@@ -1,0 +1,194 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Agent {
+  id                    String   @id @default(uuid())
+  name                  String
+  greeting              String
+  persona               String   @default("friendly and professional")
+  productName           String   @default("Cronberry CRM")
+  voiceId               String
+  voiceLanguage         String   @default("en")
+  voiceLanguages        String   @default("en,hi,hinglish")
+  voiceSpeed            Float    @default(1.0)
+  voicePitch            Float    @default(1.0)
+  ttsModel              String   @default("sonic-3.5")
+  ttsSampleRate         Int      @default(24000)
+  ttsEmotion            String   @default("")
+  voicePipeline         String   @default("cascaded")
+  realtimeVoice         String   @default("marin")
+  /** Full OpenAI Realtime / Gemini Live S2S user config (model, VAD, language, etc.). */
+  realtimeS2sConfig     Json?
+  agentGender           String   @default("female")
+  llmProvider           String   @default("gpt")
+  llmModel              String   @default("gpt-5.4-mini")
+  sttProvider           String   @default("azure")
+  sttModel              String   @default("")
+  brainMarkdown         String
+  brainSummary          String   @default("")
+  brainLearnings        String   @default("")
+  learningsEnabled      Boolean  @default(true)
+  generalKnowledgeEnabled Boolean @default(true)
+  skillsConfig          Json
+  compiledSystemPrompt  String
+  promptTokenCount      Int      @default(0)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  calls                 Call[]
+  leads                 Lead[]
+  callbacks             Callback[]
+  brainMutations        BrainMutation[]
+  globalLearningVectors GlobalLearningVector[]
+  prospectMemories      ProspectMemory[]
+  availabilityRules     AvailabilityRules?
+}
+
+model BrainMutation {
+  id        String   @id @default(uuid())
+  agentId   String
+  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  callId    String?
+  kind      String
+  content   String
+  status    String   @default("pending")
+  createdAt DateTime @default(now())
+}
+
+model GlobalLearningVector {
+  id              String   @id @default(uuid())
+  agentId         String
+  agent           Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  callId          String?
+  kind            String
+  content         String
+  embedding       Json
+  confidenceScore Float    @default(0.5)
+  usesCount       Int      @default(0)
+  successCount    Int      @default(0)
+  failureCount    Int      @default(0)
+  lastUsedAt      DateTime?
+  createdAt       DateTime @default(now())
+}
+
+model ProspectMemory {
+  id            String   @id @default(uuid())
+  agentId       String
+  agent         Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  prospectKey   String
+  displayName   String?
+  email         String?
+  phone         String?
+  factsMarkdown String   @default("")
+  callerStyle   String   @default("")
+  lastCallId    String?
+  updatedAt     DateTime @updatedAt
+
+  @@unique([agentId, prospectKey])
+}
+
+model Call {
+  id             String   @id @default(uuid())
+  agentId        String
+  agent          Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  roomName       String   @default("")
+  direction      String   @default("inbound")
+  source         String   @default("simulator")
+  status         String   @default("created")
+  externalCallId String?
+  fromNumber     String?
+  toNumber       String?
+  provider       String?
+  prospectName   String?
+  contactPhone   String?
+  contactEmail   String?
+  outcome        String?
+  transcript     Json?
+  startedAt      DateTime @default(now())
+  endedAt        DateTime?
+  brainMutationAt DateTime?
+  webhookSentAt   DateTime?
+  leads          Lead[]
+  callbacks      Callback[]
+}
+
+model Lead {
+  id                 String    @id @default(uuid())
+  callId             String?
+  call               Call?     @relation(fields: [callId], references: [id], onDelete: SetNull)
+  agentId            String
+  agent              Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  name               String
+  email              String
+  phone              String?
+  preferredTime      String
+  preferredTimeRaw   String    @default("")
+  notes              String?
+  bookingType        String    @default("demo")
+  status             String    @default("new")
+  scheduledStart     DateTime?
+  scheduledEnd       DateTime?
+  timezone           String    @default("Asia/Kolkata")
+  productInterest    String?
+  location           String?
+  locationType       String    @default("showroom")
+  source             String    @default("voice_inbound")
+  googleEventId      String?
+  calendarSyncStatus String    @default("pending")
+  assignedTo         String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @default(now()) @updatedAt
+
+  @@index([agentId, scheduledStart])
+  @@index([agentId, status])
+}
+
+model Callback {
+  id                 String    @id @default(uuid())
+  callId             String?
+  call               Call?     @relation(fields: [callId], references: [id], onDelete: SetNull)
+  agentId            String
+  agent              Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  name               String?
+  phone              String?
+  email              String?
+  preferredTime      String
+  reason             String?
+  status             String    @default("pending")
+  scheduledAt        DateTime?
+  googleEventId      String?
+  calendarSyncStatus String    @default("pending")
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @default(now()) @updatedAt
+
+  @@index([agentId, scheduledAt])
+}
+
+/// Per-agent open hours + slot capacity for month/day calendar and voice slot checks.
+model AvailabilityRules {
+  id               String   @id @default(uuid())
+  agentId          String   @unique
+  agent            Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  /// When false, voice booking skips open-day / hours / capacity checks (hotel-style free dates).
+  enabled          Boolean  @default(false)
+  timezone         String   @default("Asia/Kolkata")
+  /// JSON number[] weekday indices open (0=Sun … 6=Sat). Default Mon–Sat.
+  openDays         String   @default("[1,2,3,4,5,6]")
+  dayStartHour     Int      @default(10)
+  dayStartMinute   Int      @default(0)
+  dayEndHour       Int      @default(19)
+  dayEndMinute     Int      @default(0)
+  slotMinutes      Int      @default(30)
+  capacityPerSlot  Int      @default(1)
+  /// JSON string[] ISO dates blocked (holidays), e.g. ["2026-08-15"]
+  blockedDates     String   @default("[]")
+  /// Optional overrides per bookingType: { "test_drive": 45, "simulator": 60 }
+  slotMinutesByType String  @default("{}")
+  updatedAt        DateTime @default(now()) @updatedAt
+  createdAt        DateTime @default(now())
+}

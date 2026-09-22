@@ -1,0 +1,23 @@
+/** Re-export shared Nexora hotel facts (used by Simulator / LiveKit SIP and Acefone). */
+export {
+  NEXORA_HOTEL_SELECT_FIELDS,
+  isNexoraHotelFactsConfigured,
+  cityQueryCandidates,
+  canonicalizeHotelCityForApi,
+  canonicalizeHotelStateForApi,
+  resolveHotelMatchForApi,
+  textMentionsKnownHotelCity,
+  hotelNameQueryCandidates,
+  summarizeNexoraHotelFactsPayload,
+  compactHotelFactsForLlm,
+  queryNexoraHotelFacts,
+  resolveStayInventoryQuery,
+  evaluateStayInventoryForBooking,
+  assertLiveStayInventoryForBooking,
+  matchStayRoom,
+  type NexoraHotelRoomSummary,
+  type NexoraPropertyPolicies,
+  type NexoraHotelFactsSummary,
+  type NexoraHotelFactsError,
+  type StayInventoryGateResult,
+} from '@vsa/shared';
