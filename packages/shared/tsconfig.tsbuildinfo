@@ -1,1 +1,0 @@
-{"root":["./src/brain-mutation.ts","./src/cost-estimate.ts","./src/email-utils.test.ts","./src/email-utils.ts","./src/index.ts","./src/known-contact.ts","./src/learning-retrieval.ts","./src/natural-speech.ts"],"errors":true,"version":"5.9.3"}

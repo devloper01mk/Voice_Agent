@@ -8,16 +8,15 @@
   "scripts": {
     "dev:api": "npm run dev -w @vsa/api",
     "dev:web": "npm run dev -w @vsa/web",
-    "dev:agent": "npm run dev -w @vsa/agent",
     "dev:agent-v2": "npm run dev -w @vsa/agent-v2",
     "db:generate": "npm run db:generate -w @vsa/api",
     "db:migrate": "npm run db:migrate -w @vsa/api",
-    "db:push": "npm run db:push -w @vsa/api"
+    "db:migrate:deploy": "npm run db:migrate:deploy -w @vsa/api",
+    "db:push": "npm run db:push -w @vsa/api",
+    "test": "npm run test -w @vsa/shared && npm run test -w @vsa/api && npm run test -w @vsa/agent-v2",
+    "typecheck": "npm run build -w @vsa/shared && npx tsc -p apps/api --noEmit && npx tsc -p apps/agent-v2 --noEmit && npx tsc -p apps/web --noEmit"
   },
   "overrides": {
-    "@livekit/agents": "1.5.0",
-    "@livekit/agents-plugin-cartesia": "1.5.0",
-    "@livekit/agents-plugin-openai": "1.5.0",
-    "@livekit/agents-plugin-silero": "1.5.0"
+    "@livekit/agents": "1.5.0"
   }
 }

@@ -1,3 +1,5 @@
+import { PRODUCT_KNOWLEDGE_SEARCH_TOOL } from './product-knowledge.js';
+
 /**
  * Cap Product Knowledge size for latency. Do **not** replace principles with an
  * intent menu — compileSystemPrompt is the shared brain.
@@ -25,7 +27,11 @@ export function compactSystemPrompt(
 
   const head = compiledSystemPrompt.slice(0, productStart);
   const embeddedProduct = compiledSystemPrompt.slice(afterProduct, productEnd).trim();
-  const productBody = compactProductKnowledge(summary || embeddedProduct, maxProductChars);
+  // A catalog map already points at search_product_knowledge — swapping in the full summary would undo it.
+  const source = embeddedProduct.includes(PRODUCT_KNOWLEDGE_SEARCH_TOOL)
+    ? embeddedProduct
+    : summary || embeddedProduct;
+  const productBody = compactProductKnowledge(source, maxProductChars);
   const tail = compiledSystemPrompt.slice(productEnd);
 
   return `${head}${productMarker}\n${productBody}${tail}`.trim();

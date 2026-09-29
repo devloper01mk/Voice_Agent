@@ -4,8 +4,10 @@ import {
   toIstIsoDate,
   validateLeadEmail,
   validateLeadPhone,
+  applyPlaybookToSkills,
   mergeSkillsConfig,
   missingBookingDiscussGates,
+  missingCustomFields,
   bookingDiscussGateRejection,
   normalizeBookingTypeSlug,
   type SkillsConfig,
@@ -14,11 +16,6 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { getAvailabilityConfig, loadActiveBookings } from '../availability.js';
 import { prisma } from '../db.js';
-import {
-  createGoogleCalendarEvent,
-  deleteGoogleCalendarEvent,
-  updateGoogleCalendarEvent,
-} from '../google-calendar.js';
 import { upsertProspectContact } from '../known-contact.js';
 
 export const leadsRouter = Router();
@@ -28,7 +25,8 @@ const bookingTypeSchema = z
   .min(1)
   .max(48)
   .regex(/^[a-z][a-z0-9_]*$/, 'bookingType must be a lowercase slug');
-const locationTypeSchema = z.enum(['showroom', 'home', 'online', 'hotel']);
+const locationTypeSchema = z.string().trim().min(1).max(32);
+const detailsSchema = z.record(z.string().max(32), z.union([z.string().max(200), z.number(), z.boolean()]));
 const leadStatusSchema = z.enum([
   'new',
   'confirmed',
@@ -119,79 +117,6 @@ async function resolveSchedule(opts: {
   return { scheduledStart, scheduledEnd, approximate, availability };
 }
 
-async function syncLeadToGoogle(lead: {
-  id: string;
-  name: string;
-  email: string;
-  phone: string | null;
-  notes: string | null;
-  bookingType: string;
-  productInterest: string | null;
-  location: string | null;
-  preferredTimeRaw: string;
-  preferredTime: string;
-  scheduledStart: Date | null;
-  scheduledEnd: Date | null;
-  timezone: string;
-  callId: string | null;
-  agentId: string;
-  googleEventId: string | null;
-}) {
-  if (!lead.scheduledStart || !lead.scheduledEnd) {
-    return { calendarSyncStatus: 'skipped' as const, googleEventId: lead.googleEventId };
-  }
-
-  const summary = `${lead.bookingType.replace('_', ' ')}: ${lead.name}${
-    lead.productInterest ? ` — ${lead.productInterest}` : ''
-  }`;
-  const description = [
-    `Phone: ${lead.phone ?? '—'}`,
-    `Email: ${lead.email}`,
-    `Notes: ${lead.notes ?? '—'}`,
-    `Preferred (raw): ${lead.preferredTimeRaw || lead.preferredTime}`,
-    `Lead ID: ${lead.id}`,
-    lead.callId ? `Call ID: ${lead.callId}` : null,
-  ]
-    .filter(Boolean)
-    .join('\n');
-
-  const input = {
-    summary,
-    description,
-    location: lead.location ?? undefined,
-    start: lead.scheduledStart,
-    end: lead.scheduledEnd,
-    attendeeEmail: lead.email.includes('@') && !lead.email.endsWith('@voice.local')
-      ? lead.email
-      : undefined,
-    timezone: lead.timezone,
-    extendedPrivate: {
-      leadId: lead.id,
-      agentId: lead.agentId,
-      bookingType: lead.bookingType,
-      ...(lead.callId ? { callId: lead.callId } : {}),
-    },
-  };
-
-  if (lead.googleEventId) {
-    const updated = await updateGoogleCalendarEvent(lead.googleEventId, input);
-    if (updated.ok) return { calendarSyncStatus: 'synced' as const, googleEventId: lead.googleEventId };
-    return {
-      calendarSyncStatus: updated.status === 'skipped' ? ('skipped' as const) : ('failed' as const),
-      googleEventId: lead.googleEventId,
-    };
-  }
-
-  const created = await createGoogleCalendarEvent(input);
-  if (created.ok) {
-    return { calendarSyncStatus: 'synced' as const, googleEventId: created.eventId };
-  }
-  return {
-    calendarSyncStatus: created.status === 'skipped' ? ('skipped' as const) : ('failed' as const),
-    googleEventId: null as string | null,
-  };
-}
-
 leadsRouter.post('/', async (req, res) => {
   const schema = z.object({
     agentId: z.string().uuid(),
@@ -205,6 +130,7 @@ leadsRouter.post('/', async (req, res) => {
     productInterest: z.string().optional(),
     location: z.string().optional(),
     locationType: locationTypeSchema.optional(),
+    details: detailsSchema.optional(),
     source: z.string().optional(),
     scheduledStart: z.string().datetime().optional(),
     scheduledEnd: z.string().datetime().optional(),
@@ -220,13 +146,24 @@ leadsRouter.post('/', async (req, res) => {
 
   const agentRow = await prisma.agent.findUnique({
     where: { id: parsed.data.agentId },
-    select: { skillsConfig: true },
+    select: { skillsConfig: true, playbook: true },
   });
   if (!agentRow) return res.status(404).json({ error: 'Agent not found' });
-  const bookingPolicy = mergeSkillsConfig(
-    agentRow.skillsConfig as unknown as Partial<SkillsConfig> | null,
+  const bookingPolicy = applyPlaybookToSkills(
+    mergeSkillsConfig(agentRow.skillsConfig as unknown as Partial<SkillsConfig> | null),
+    agentRow.playbook,
   ).booking;
   const isManualCrm = parsed.data.source === 'manual';
+  const missingFields = missingCustomFields(bookingPolicy, parsed.data.details);
+  if (!isManualCrm && missingFields.length > 0) {
+    return res.status(400).json({
+      ok: false,
+      error: `Missing required details: ${missingFields.map((f) => f.key).join(', ')}`,
+      hint: `Do NOT say the booking is confirmed. When the caller is ready, ask for ${missingFields
+        .map((f) => f.label)
+        .join(', ')} (one at a time), then retry with details { ${missingFields.map((f) => f.key).join(', ')} }.`,
+    });
+  }
   const missingGates = missingBookingDiscussGates(bookingPolicy, {
     payment_discussed: parsed.data.paymentDiscussed === true,
     cancellation_discussed: parsed.data.cancellationDiscussed === true,
@@ -274,7 +211,7 @@ leadsRouter.post('/', async (req, res) => {
   }
 
   const bookingType = normalizeBookingTypeSlug(parsed.data.bookingType ?? 'demo') || 'demo';
-  const locationType = parsed.data.locationType ?? (bookingType === 'stay' ? 'hotel' : 'showroom');
+  const locationType = parsed.data.locationType ?? bookingPolicy?.locationType ?? 'online';
   const preferredTime = parsed.data.preferredTime?.trim() || 'Not set';
   const schedule = await resolveSchedule({
     preferredTime,
@@ -331,8 +268,9 @@ leadsRouter.post('/', async (req, res) => {
       productInterest: parsed.data.productInterest,
       location: parsed.data.location,
       locationType,
+      details: parsed.data.details ?? {},
       source: source ?? 'voice_inbound',
-      calendarSyncStatus: isManualCrm ? 'skipped' : 'pending',
+      calendarSyncStatus: 'skipped',
     },
   });
 
@@ -348,25 +286,9 @@ leadsRouter.post('/', async (req, res) => {
     });
   }
 
-  if (isManualCrm) {
-    return res.status(201).json({
-      ...lead,
-      scheduleApproximate: false,
-    });
-  }
-
-  const sync = await syncLeadToGoogle(lead);
-  const updated = await prisma.lead.update({
-    where: { id: lead.id },
-    data: {
-      calendarSyncStatus: sync.calendarSyncStatus,
-      googleEventId: sync.googleEventId,
-    },
-  });
-
   res.status(201).json({
-    ...updated,
-    scheduleApproximate: schedule.approximate,
+    ...lead,
+    scheduleApproximate: isManualCrm ? false : schedule.approximate,
   });
 });
 
@@ -456,13 +378,9 @@ leadsRouter.patch('/:id', async (req, res) => {
     }
   }
 
-  if (parsed.data.status === 'cancelled' && existing.googleEventId) {
-    await deleteGoogleCalendarEvent(existing.googleEventId);
-  }
-
   const nextName = parsed.data.name?.trim() || existing.name;
 
-  let lead = await prisma.lead.update({
+  const lead = await prisma.lead.update({
     where: { id: existing.id },
     data: {
       status: parsed.data.status,
@@ -475,6 +393,8 @@ leadsRouter.patch('/:id', async (req, res) => {
       preferredTimeRaw,
       scheduledStart,
       scheduledEnd,
+      calendarSyncStatus: 'skipped',
+      ...(parsed.data.status === 'cancelled' ? { googleEventId: null } : {}),
     },
   });
 
@@ -484,22 +404,6 @@ leadsRouter.patch('/:id', async (req, res) => {
       { name: nextName, email: lead.email, phone: lead.phone ?? undefined },
       lead.callId ?? undefined,
     );
-  }
-
-  if (parsed.data.status !== 'cancelled') {
-    const sync = await syncLeadToGoogle(lead);
-    lead = await prisma.lead.update({
-      where: { id: lead.id },
-      data: {
-        calendarSyncStatus: sync.calendarSyncStatus,
-        googleEventId: sync.googleEventId ?? lead.googleEventId,
-      },
-    });
-  } else {
-    lead = await prisma.lead.update({
-      where: { id: lead.id },
-      data: { calendarSyncStatus: 'skipped', googleEventId: null },
-    });
   }
 
   res.json(lead);
@@ -594,7 +498,7 @@ leadsRouter.post('/callback', async (req, res) => {
         scheduledStart: schedule.scheduledStart,
         scheduledEnd: schedule.scheduledEnd,
         source,
-        calendarSyncStatus: 'pending',
+        calendarSyncStatus: 'skipped',
       },
     });
     await upsertProspectContact(
@@ -612,16 +516,8 @@ leadsRouter.post('/callback', async (req, res) => {
         data: { outcome: 'demo_booked' },
       });
     }
-    const sync = await syncLeadToGoogle(lead);
-    const updated = await prisma.lead.update({
-      where: { id: lead.id },
-      data: {
-        calendarSyncStatus: sync.calendarSyncStatus,
-        googleEventId: sync.googleEventId,
-      },
-    });
     return res.status(201).json({
-      ...updated,
+      ...lead,
       redirectedFromCallback: true,
       message: 'Visit saved as Lead booking (not callback).',
     });

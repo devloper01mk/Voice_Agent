@@ -1,6 +1,5 @@
-import { NavLink, Route, Routes } from 'react-router-dom';
+import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
 import StudioPage from './pages/Studio';
-import SimulatorPage from './pages/Simulator';
 import Simulator2Page from './pages/Simulator2';
 import LeadsPage from './pages/Leads';
 import ActiveLeadsPage from './pages/ActiveLeads';
@@ -8,8 +7,7 @@ import OutboundCallPage from './pages/OutboundCall';
 
 const NAV_ITEMS = [
   { to: '/', end: true, icon: '🎙️', label: 'Agent Studio' },
-  { to: '/simulator', icon: '📞', label: 'Call Simulator' },
-  { to: '/simulator2', icon: '⚡', label: 'Simulator 2.0' },
+  { to: '/simulator2', icon: '⚡', label: 'Simulator' },
   { to: '/outbound', icon: '📱', label: 'Outbound Call' },
   { to: '/leads', icon: '📅', label: 'Leads & Calendar' },
   { to: '/active-leads', icon: '👥', label: 'Active leads' },
@@ -49,7 +47,7 @@ export default function App() {
         <main className="notion-main">
           <Routes>
             <Route path="/" element={<StudioPage />} />
-            <Route path="/simulator" element={<SimulatorPage />} />
+            <Route path="/simulator" element={<Navigate to="/simulator2" replace />} />
             <Route path="/simulator2" element={<Simulator2Page />} />
             <Route path="/outbound" element={<OutboundCallPage />} />
             <Route path="/leads" element={<LeadsPage />} />

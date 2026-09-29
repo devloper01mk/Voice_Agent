@@ -1,7 +1,26 @@
-import type { RealtimeS2sUserConfig, SkillsConfig, SttProvider, VoicePipeline } from '@vsa/shared';
+import type { RealtimeS2sUserConfig, SalesPlaybook, SkillsConfig, VoicePipeline } from '@vsa/shared';
 import { normalizeRealtimeS2sUserConfig } from '@vsa/shared';
 
 const API = '/api';
+
+function apiAuthToken(): string {
+  return String(import.meta.env.VITE_API_AUTH_TOKEN ?? '').trim();
+}
+
+/** For EventSource / query-token clients that cannot set Authorization headers. */
+export function apiAuthQueryParam(): string {
+  const token = apiAuthToken();
+  return token ? `token=${encodeURIComponent(token)}` : '';
+}
+
+async function apiFetch(input: string, init?: RequestInit): Promise<Response> {
+  const headers = new Headers(init?.headers);
+  const token = apiAuthToken();
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+  return fetch(input, { ...init, headers });
+}
 
 export interface Agent {
   id: string;
@@ -19,14 +38,19 @@ export interface Agent {
   ttsEmotion?: string;
   voicePipeline?: VoicePipeline;
   realtimeVoice?: string;
-  /** Persisted OpenAI Realtime / Gemini Live S2S settings (model, VAD, language…). */
+  /** Persisted Gemini Live S2S settings (model, VAD, language…). */
   realtimeS2sConfig?: RealtimeS2sUserConfig | null;
   agentGender: 'female' | 'male';
-  llmProvider: 'groq' | 'gpt';
+  llmProvider: 'gpt';
   llmModel: string;
-  sttProvider: SttProvider;
-  sttModel: string;
+  /** Legacy cascaded STT — unused (Gemini Live). Optional for API compat. */
+  sttProvider?: string;
+  sttModel?: string;
   brainMarkdown: string;
+  /** Short always-on guardrails (kept out of searchable Brain). */
+  agentRules?: string;
+  /** Sales playbook JSON; null/absent → derived from Booking policy. */
+  playbook?: SalesPlaybook | null;
   brainSummary?: string;
   brainLearnings?: string;
   learningsEnabled?: boolean;
@@ -56,7 +80,7 @@ export interface AgentSummary {
 }
 
 export async function listAgents(): Promise<AgentSummary[]> {
-  const res = await fetch(`${API}/agents`);
+  const res = await apiFetch(`${API}/agents`);
   if (!res.ok) throw new Error('Failed to list agents');
   const data: unknown = await res.json();
   if (!Array.isArray(data)) throw new Error('Failed to list agents');
@@ -64,13 +88,13 @@ export async function listAgents(): Promise<AgentSummary[]> {
 }
 
 export async function getAgent(id: string): Promise<Agent> {
-  const res = await fetch(`${API}/agents/${id}`);
+  const res = await apiFetch(`${API}/agents/${id}`);
   if (!res.ok) throw new Error('Agent not found');
   return res.json();
 }
 
 export async function createAgent(data: Partial<Agent>): Promise<Agent> {
-  const res = await fetch(`${API}/agents`, {
+  const res = await apiFetch(`${API}/agents`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -82,7 +106,7 @@ export async function createAgent(data: Partial<Agent>): Promise<Agent> {
 }
 
 export async function updateAgent(id: string, data: Partial<Agent>): Promise<Agent> {
-  const res = await fetch(`${API}/agents/${id}`, {
+  const res = await apiFetch(`${API}/agents/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -110,40 +134,6 @@ async function readApiError(res: Response, fallback: string): Promise<string> {
   return `${fallback} (${res.status})`;
 }
 
-export async function getLiveKitToken(
-  agentId: string,
-  options?: {
-    participantName?: string;
-    direction?: 'inbound' | 'outbound';
-    prospectName?: string;
-    contactPhone?: string;
-    contactEmail?: string;
-  },
-) {
-  const res = await fetch(`${API}/livekit/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      agentId,
-      participantName: options?.participantName,
-      direction: options?.direction ?? 'inbound',
-      prospectName: options?.prospectName,
-      contactPhone: options?.contactPhone,
-      contactEmail: options?.contactEmail,
-    }),
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error((body as { error?: string }).error || `Failed to get LiveKit token (${res.status})`);
-  }
-  return res.json() as Promise<{
-    token: string;
-    url: string;
-    roomName: string;
-    callId: string;
-  }>;
-}
-
 export async function getSimulator2Token(
   agentId: string,
   options?: {
@@ -157,7 +147,7 @@ export async function getSimulator2Token(
     realtimeS2sConfig?: RealtimeS2sUserConfig;
   },
 ) {
-  const res = await fetch(`${API}/simulator2/livekit/token`, {
+  const res = await apiFetch(`${API}/simulator2/livekit/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -219,7 +209,7 @@ export interface CallMetricsSummary {
   totalLlmCachedPromptTokens?: number;
   totalLlmCompletionTokens?: number;
   totalTtsCharacters?: number;
-  /** Speech-to-speech (OpenAI Realtime / Gemini Live) token usage. */
+  /** Speech-to-speech (Gemini Live) token usage. */
   totalS2sInputTextTokens?: number;
   totalS2sInputAudioTokens?: number;
   totalS2sOutputTextTokens?: number;
@@ -231,7 +221,7 @@ export async function saveCallSummary(
   callId: string,
   data: { transcript: TranscriptLine[]; metrics: CallMetricsSummary; outcome?: string },
 ) {
-  const res = await fetch(`${API}/calls/${callId}`, {
+  const res = await apiFetch(`${API}/calls/${callId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -241,93 +231,6 @@ export async function saveCallSummary(
   });
   if (!res.ok) throw new Error('Failed to save call summary');
   return res.json();
-}
-
-export interface CartesiaVoice {
-  id: string;
-  name: string;
-  description: string;
-  language: string;
-  gender: string;
-  isPublic: boolean;
-}
-
-export interface CartesiaLanguage {
-  code: string;
-  label: string;
-}
-
-export interface TtsModel {
-  id: string;
-  label: string;
-}
-
-export interface TtsSampleRate {
-  id: number;
-  label: string;
-}
-
-export interface TtsEmotion {
-  id: string;
-  label: string;
-}
-
-export async function listTtsModels(): Promise<TtsModel[]> {
-  const res = await fetch(`${API}/tts/models`);
-  if (!res.ok) throw new Error('Failed to load TTS models');
-  return res.json();
-}
-
-export async function listTtsSampleRates(): Promise<TtsSampleRate[]> {
-  const res = await fetch(`${API}/tts/sample-rates`);
-  if (!res.ok) throw new Error('Failed to load sample rates');
-  return res.json();
-}
-
-export async function listTtsEmotions(): Promise<TtsEmotion[]> {
-  const res = await fetch(`${API}/tts/emotions`);
-  if (!res.ok) throw new Error('Failed to load emotions');
-  return res.json();
-}
-
-export async function listTtsLanguages(): Promise<CartesiaLanguage[]> {
-  const res = await fetch(`${API}/tts/languages`);
-  if (!res.ok) throw new Error('Failed to load languages');
-  return res.json();
-}
-
-export async function listTtsVoices(): Promise<CartesiaVoice[]> {
-  const res = await fetch(`${API}/tts/voices`);
-  if (!res.ok) throw new Error('Failed to load voices');
-  return res.json();
-}
-
-export async function previewTts(
-  text: string,
-  voiceId: string,
-  speed = 1,
-  pitch = 1,
-  voiceLanguages = 'en,hi,hinglish',
-  modelId = 'sonic-3.6',
-  sampleRate = 24000,
-  emotion = '',
-) {
-  const res = await fetch(`${API}/tts/preview`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      text,
-      voiceId,
-      speed,
-      pitch,
-      voiceLanguages,
-      modelId,
-      sampleRate,
-      emotion,
-    }),
-  });
-  if (!res.ok) throw new Error('TTS preview failed');
-  return res.blob();
 }
 
 export interface BrainMutation {
@@ -354,7 +257,7 @@ export interface ProspectMemory {
 export async function getGlobalLearningStats(
   agentId: string,
 ): Promise<{ vectorCount: number; textLineCount: number }> {
-  const res = await fetch(`${API}/agents/${agentId}/learning-stats`);
+  const res = await apiFetch(`${API}/agents/${agentId}/learning-stats`);
   if (!res.ok) throw new Error('Failed to load learning stats');
   return res.json();
 }
@@ -367,7 +270,7 @@ export async function listMutations(
   if (options?.status) params.set('status', options.status);
   if (options?.limit) params.set('limit', String(options.limit));
   const qs = params.toString();
-  const res = await fetch(`${API}/agents/${agentId}/mutations${qs ? `?${qs}` : ''}`);
+  const res = await apiFetch(`${API}/agents/${agentId}/mutations${qs ? `?${qs}` : ''}`);
   if (!res.ok) throw new Error('Failed to load mutations');
   return res.json();
 }
@@ -381,28 +284,28 @@ export async function listLearningAudit(agentId: string): Promise<BrainMutation[
 }
 
 export async function clearBrainLearnings(agentId: string): Promise<void> {
-  const res = await fetch(`${API}/agents/${agentId}/mutations/clear-learnings`, {
+  const res = await apiFetch(`${API}/agents/${agentId}/mutations/clear-learnings`, {
     method: 'POST',
   });
   if (!res.ok) throw new Error('Failed to clear learnings');
 }
 
 export async function approveMutation(agentId: string, mutationId: string): Promise<void> {
-  const res = await fetch(`${API}/agents/${agentId}/mutations/${mutationId}/approve`, {
+  const res = await apiFetch(`${API}/agents/${agentId}/mutations/${mutationId}/approve`, {
     method: 'POST',
   });
   if (!res.ok) throw new Error('Failed to approve mutation');
 }
 
 export async function rejectMutation(agentId: string, mutationId: string): Promise<void> {
-  const res = await fetch(`${API}/agents/${agentId}/mutations/${mutationId}/reject`, {
+  const res = await apiFetch(`${API}/agents/${agentId}/mutations/${mutationId}/reject`, {
     method: 'POST',
   });
   if (!res.ok) throw new Error('Failed to reject mutation');
 }
 
 export async function listProspectMemories(agentId: string): Promise<ProspectMemory[]> {
-  const res = await fetch(`${API}/agents/${agentId}/prospects`);
+  const res = await apiFetch(`${API}/agents/${agentId}/prospects`);
   if (!res.ok) throw new Error('Failed to load prospect memories');
   return res.json();
 }
@@ -456,7 +359,7 @@ export async function listLeads(
   if (options?.status) params.set('status', options.status);
   if (options?.source) params.set('source', options.source);
   const qs = params.toString();
-  const res = await fetch(`${API}/leads/agent/${agentId}${qs ? `?${qs}` : ''}`);
+  const res = await apiFetch(`${API}/leads/agent/${agentId}${qs ? `?${qs}` : ''}`);
   if (!res.ok) throw new Error('Failed to load leads');
   return res.json();
 }
@@ -473,7 +376,7 @@ export async function createLead(data: {
   source?: string;
   skipAvailabilityCheck?: boolean;
 }): Promise<LeadRow> {
-  const res = await fetch(`${API}/leads`, {
+  const res = await apiFetch(`${API}/leads`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -499,7 +402,7 @@ export async function updateLead(
     forceBook: boolean;
   }>,
 ): Promise<LeadRow> {
-  const res = await fetch(`${API}/leads/${id}`, {
+  const res = await apiFetch(`${API}/leads/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -545,14 +448,14 @@ export async function listCalls(
   const params = new URLSearchParams({ agentId });
   if (options?.direction) params.set('direction', options.direction);
   if (options?.take) params.set('take', String(options.take));
-  const res = await fetch(`${API}/calls?${params}`);
+  const res = await apiFetch(`${API}/calls?${params}`);
   if (!res.ok) throw new Error('Failed to load calls');
   const data = (await res.json()) as { calls: CallListItem[] };
   return data.calls;
 }
 
 export async function getCall(id: string) {
-  const res = await fetch(`${API}/calls/${id}`);
+  const res = await apiFetch(`${API}/calls/${id}`);
   if (!res.ok) throw new Error('Call not found');
   return res.json() as Promise<{
     id: string;
@@ -601,7 +504,7 @@ export type TelephonyTransports = {
 };
 
 export async function getTelephonyTransports(): Promise<TelephonyTransports> {
-  const res = await fetch(`${API}/telephony/transports`);
+  const res = await apiFetch(`${API}/telephony/transports`);
   if (!res.ok) {
     return {
       acefone: true,
@@ -620,7 +523,7 @@ export async function initiateOutboundCall(options: {
   toNumber: string;
   prospectName?: string;
   contactEmail?: string;
-  voicePipeline?: 'agent' | 'cascaded' | 'openai_realtime' | 'gemini_live';
+  voicePipeline?: 'agent' | 'gemini_live';
   realtimeS2sConfig?: RealtimeS2sUserConfig;
   transport?: 'acefone' | 'livekit_sip';
   waitUntilAnswered?: boolean;
@@ -642,7 +545,7 @@ export async function initiateOutboundCall(options: {
   playDialtone?: boolean;
   realtimeS2sConfig?: RealtimeS2sUserConfig;
 }> {
-  const res = await fetch(`${API}/telephony/outbound-call`, {
+  const res = await apiFetch(`${API}/telephony/outbound-call`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -659,7 +562,7 @@ export async function initiateOutboundCall(options: {
 }
 
 export async function hangupOutboundCall(callId: string): Promise<{ ok: boolean; callId: string }> {
-  const res = await fetch(`${API}/telephony/calls/${callId}/hangup`, {
+  const res = await apiFetch(`${API}/telephony/calls/${callId}/hangup`, {
     method: 'POST',
   });
   if (!res.ok) {
@@ -694,7 +597,7 @@ export async function getCalendarMonth(
     year: String(year),
     month: String(month),
   });
-  const res = await fetch(`${API}/calendar/month?${params}`);
+  const res = await apiFetch(`${API}/calendar/month?${params}`);
   if (!res.ok) throw new Error('Failed to load calendar month');
   return res.json();
 }
@@ -712,7 +615,7 @@ export async function getCalendarDay(
   date: string,
 ): Promise<{ date: string; timezone: string; slots: DaySlot[] }> {
   const params = new URLSearchParams({ agentId, date });
-  const res = await fetch(`${API}/calendar/day?${params}`);
+  const res = await apiFetch(`${API}/calendar/day?${params}`);
   if (!res.ok) throw new Error('Failed to load calendar day');
   return res.json();
 }
@@ -736,7 +639,7 @@ export async function getAgentAvailability(agentId: string): Promise<{
   stored: unknown;
   bookingWindow: string;
 }> {
-  const res = await fetch(`${API}/calendar/availability/${agentId}`);
+  const res = await apiFetch(`${API}/calendar/availability/${agentId}`);
   if (!res.ok) throw new Error(await readApiError(res, 'Failed to load availability'));
   return res.json();
 }
@@ -748,7 +651,7 @@ export async function saveAgentAvailability(
   config: AgentAvailabilityConfig;
   bookingWindow: string;
 }> {
-  const res = await fetch(`${API}/calendar/availability/${agentId}`, {
+  const res = await apiFetch(`${API}/calendar/availability/${agentId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),

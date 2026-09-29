@@ -1,6 +1,6 @@
 /**
  * Natural spoken clock times for TTS — never leave "H:MM" with a colon
- * (Cartesia often says "colon").
+ * (many TTS voices literally say "colon").
  */
 
 export type SpokenTimeLang = 'en' | 'hinglish';
@@ -170,7 +170,7 @@ export function rewriteClockTimesForSpeech(
     return `${hourRaw} ${minuteRaw}`;
   });
 
-  // Stream-safe: any remaining digit-colon must not reach Cartesia as "colon".
+  // Stream-safe: any remaining digit-colon must not reach TTS as "colon".
   core = core.replace(/(\d):/g, '$1 ');
 
   core = core.replace(/\s+/g, ' ').trim();
@@ -178,7 +178,7 @@ export function rewriteClockTimesForSpeech(
 }
 
 /**
- * Cartesia reads Roman "rahi" as English "rah-hee". Spell रही as "rehi"
+ * Some TTS voices read Roman "rahi" as English "rah-hee". Spell रही as "rehi"
  * so "bol rahi hoon" sounds like "bol rehi hoon".
  */
 export function rewriteRahiForSpeech(text: string): string {
@@ -211,7 +211,7 @@ const HI_NUM_TO_EN: Record<string, string> = {
 
 /**
  * When English TTS is locked, rewrite common Roman-Hindi quantity/clock slips
- * so Cartesia does not say "das" / "do baje". Preserves leading/trailing spaces.
+ * so the voice does not say "das" / "do baje". Preserves leading/trailing spaces.
  */
 export function rewriteHindiQuantityWordsForEnglishSpeech(text: string): string {
   if (!text) return text;

@@ -22,7 +22,15 @@ export type BookingPolicyTemplateId =
   | 'auto_test_drive'
   | 'custom';
 
-export type BookingLocationType = 'showroom' | 'home' | 'online' | 'hotel';
+/** Free-text slug (e.g. online, home, site, hotel, showroom) — not a fixed industry list. */
+export type BookingLocationType = string;
+
+/** Extra per-agent fields collected before save (from the Sales playbook) → Lead.details. */
+export interface BookingCustomField {
+  key: string;
+  label: string;
+  required: boolean;
+}
 
 export interface BookingPolicy {
   /** Preset used to seed this policy (UI hint). */
@@ -54,6 +62,8 @@ export interface BookingPolicy {
   askEmail: boolean;
   /** Extra free-text rules injected into the system prompt. */
   notes: string;
+  /** Playbook fields saved in Lead.details (empty unless a playbook defines them). */
+  customFields?: BookingCustomField[];
 }
 
 /** Seed vocabulary from outcome when older agents lack explicit fields. */
@@ -73,10 +83,10 @@ export function vocabularyForOutcome(outcome: BookingOutcome): {
       };
     case 'visit':
       return {
-        bookingType: 'showroom_visit',
-        speakAs: 'showroom visit or test drive',
-        allowedBookingTypes: ['showroom_visit', 'test_drive'],
-        locationType: 'showroom',
+        bookingType: 'visit',
+        speakAs: 'visit',
+        allowedBookingTypes: ['visit'],
+        locationType: 'on_site',
       };
     case 'callback':
       return {
@@ -150,7 +160,10 @@ export const BOOKING_POLICY_TEMPLATES: Record<
     policy: {
       templateId: 'auto_test_drive',
       outcome: 'visit',
-      ...vocabularyForOutcome('visit'),
+      bookingType: 'showroom_visit',
+      speakAs: 'showroom visit or test drive',
+      allowedBookingTypes: ['showroom_visit', 'test_drive'],
+      locationType: 'showroom',
       requiredFields: ['preferred_time', 'name', 'phone'],
       discussBeforeSave: [],
       askEmail: false,
@@ -174,13 +187,47 @@ const GATE_LABELS: Record<BookingDiscussGate, string> = {
   budget: 'budget fit from Product Knowledge (no invented prices)',
 };
 
-const OUTCOME_LABELS: Record<BookingOutcome, string> = {
-  demo: 'product demo',
-  visit: 'showroom visit / test drive',
-  stay: 'stay / hotel booking',
-  callback: 'callback only (prefer schedule_callback)',
-  lead_only: 'lead capture without a timed booking',
+/** Spoken outcome comes from speakAs (playbook goal); this only adds how the outcome behaves. */
+const OUTCOME_HINTS: Partial<Record<BookingOutcome, string>> = {
+  callback: ' (callback only — prefer schedule_callback)',
+  lead_only: ' (lead capture without a timed booking)',
 };
+
+function outcomeLabel(policy: BookingPolicy): string {
+  return `${policy.speakAs}${OUTCOME_HINTS[policy.outcome] ?? ''}`;
+}
+
+const CUSTOM_FIELD_KEY_RE = /^[a-z][a-z0-9_]{0,31}$/;
+
+function sanitizeCustomFields(raw: unknown): BookingCustomField[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: BookingCustomField[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const f = item as Partial<BookingCustomField>;
+    const key = typeof f.key === 'string' ? normalizeBookingTypeSlug(f.key).slice(0, 32) : '';
+    const label = typeof f.label === 'string' ? f.label.trim().slice(0, 60) : '';
+    if (!CUSTOM_FIELD_KEY_RE.test(key) || !label || seen.has(key)) continue;
+    seen.add(key);
+    out.push({ key, label, required: f.required === true });
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+
+/** Required playbook fields not yet present in `details`. */
+export function missingCustomFields(
+  policyInput: Partial<BookingPolicy> | null | undefined,
+  details: Record<string, unknown> | null | undefined,
+): BookingCustomField[] {
+  const policy = mergeBookingPolicy(policyInput);
+  return (policy.customFields ?? []).filter((f) => {
+    if (!f.required) return false;
+    const v = details?.[f.key];
+    return v == null || (typeof v === 'string' && !v.trim());
+  });
+}
 
 function uniq<T extends string>(items: T[]): T[] {
   return [...new Set(items)];
@@ -244,13 +291,9 @@ export function mergeBookingPolicy(partial?: Partial<BookingPolicy> | null): Boo
       ? partial.speakAs.trim()
       : vocab.speakAs;
 
-  const locationType: BookingLocationType =
-    partial.locationType === 'showroom' ||
-    partial.locationType === 'home' ||
-    partial.locationType === 'online' ||
-    partial.locationType === 'hotel'
-      ? partial.locationType
-      : vocab.locationType;
+  const locationRaw =
+    typeof partial.locationType === 'string' ? normalizeBookingTypeSlug(partial.locationType).slice(0, 32) : '';
+  const locationType: BookingLocationType = locationRaw || vocab.locationType;
 
   return {
     templateId: partial.templateId ?? DEFAULT_BOOKING_POLICY.templateId,
@@ -263,6 +306,7 @@ export function mergeBookingPolicy(partial?: Partial<BookingPolicy> | null): Boo
     discussBeforeSave,
     askEmail: partial.askEmail ?? DEFAULT_BOOKING_POLICY.askEmail,
     notes: typeof partial.notes === 'string' ? partial.notes : DEFAULT_BOOKING_POLICY.notes,
+    customFields: sanitizeCustomFields(partial.customFields),
   };
 }
 
@@ -302,12 +346,7 @@ export function bookingSavedConfirmMessage(
     return 'Already saved this call. Restate the same slot. Do not say it is full. Then end_call.';
   }
   const label = policy.speakAs;
-  const others = policy.allowedBookingTypes.filter((t) => t !== policy.bookingType);
-  const never =
-    others.length === 0 && policy.outcome === 'stay'
-      ? ' NEVER say showroom visit, test drive, or demo.'
-      : ` Do not call it something else (only: ${policy.allowedBookingTypes.join(', ')}).`;
-  return `Saved as ${opts?.bookingType ?? policy.bookingType}. Tell the caller their ${label} is confirmed.${never}`;
+  return `Saved as ${opts?.bookingType ?? policy.bookingType}. Tell the caller their ${label} is confirmed. Do not call it anything else.`;
 }
 
 /** Prompt block — keep compact for phone S2S trim. */
@@ -333,12 +372,19 @@ export function buildBookingPolicyPrompt(policyInput?: Partial<BookingPolicy> | 
       : '';
 
   const typeLine = `- Save booking_type must be one of: ${policy.allowedBookingTypes.join(', ')} (default **${policy.bookingType}**). Do not invent other types.
-- After save ok:true, say **${policy.speakAs}** confirmed — never use other product vocabulary (e.g. do not say showroom visit unless that is this agent's speakAs).`;
+- After save ok:true, say **${policy.speakAs}** confirmed — never use another outcome's vocabulary.`;
+
+  const custom = policy.customFields ?? [];
+  const customLine = custom.length
+    ? `- Also collect before save (pass in capture_demo_lead \`details\`): ${custom
+        .map((f) => `${f.label} → details.${f.key}${f.required ? ' (required)' : ' (if they share it)'}`)
+        .join('; ')}. Ask one at a time, only when they want the ${policy.speakAs}.\n`
+    : '';
 
   return `## Booking policy (this agent)
-- Save outcome: **${OUTCOME_LABELS[policy.outcome]}** via capture_demo_lead (or schedule_callback if they only want a later call).
+- Save outcome: **${outcomeLabel(policy)}** via capture_demo_lead (or schedule_callback if they only want a later call).
 - Required before capture_demo_lead: ${fields}.
-- Must discuss before save: ${gates}.
+${customLine}- Must discuss before save: ${gates}.
 ${discussTiming ? `${discussTiming}\n` : ''}${typeLine}
 - Never call capture_demo_lead until required fields are confirmed AND discuss-before-save topics are covered (use Product Knowledge for amounts/policies — do not invent).
 - For each discuss gate, set the matching *_discussed=true flag on capture_demo_lead only after the caller acknowledged. The server rejects saves without those flags.
@@ -371,7 +417,11 @@ export function buildCaptureDemoLeadToolDescription(
   const nameBit = knownName
     ? `Name on file: ${knownName} — do not ask again.`
     : 'Confirm name with read-back yes/haan.';
-  const outcome = OUTCOME_LABELS[policy.outcome];
+  const outcome = outcomeLabel(policy);
+  const custom = policy.customFields ?? [];
+  const customHint = custom.length
+    ? `Pass details {${custom.map((f) => `${f.key}${f.required ? '*' : ''}`).join(', ')}} (* = required; ask only when missing). `
+    : '';
   const allowed = policy.allowedBookingTypes.join(' | ');
   const typeHint = `Set booking_type to one of [${allowed}] (default ${policy.bookingType}). After ok:true say "${policy.speakAs}" confirmed — never other product labels.`;
   const stayInventoryHint =
@@ -384,9 +434,10 @@ export function buildCaptureDemoLeadToolDescription(
     `Collect/confirm in order: ${fieldOrder || 'preferred_time'}. ${nameBit} ${email} ` +
     `Set name_confirmed/phone_confirmed only after explicit yes/haan. ` +
     `${gateFlags}` +
+    `${customHint}` +
     `${typeHint}` +
     `${stayInventoryHint}` +
-    `NEVER use schedule_callback for visits/stays. Only call this tool when policy gates are done. ` +
+    `NEVER use schedule_callback for a ${policy.speakAs}. Only call this tool when policy gates are done. ` +
     `Server rejects the save if required *_discussed flags are missing — never announce confirmed until ok:true.`
   );
 }

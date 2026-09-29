@@ -12,6 +12,8 @@ import {
   type SkillsConfig,
   type CallDirection,
 } from '@vsa/shared';
+import { speakLine } from './speak-line.js';
+import { apiFetch } from './api-fetch.js';
 
 export type BookingLockBox = { saved: boolean; preferredTime?: string };
 
@@ -28,6 +30,7 @@ export interface UserTurnHandlerOptions {
   hasConsumedLeadHistory?: boolean;
   agentGender?: string;
   contactName?: string;
+  callId?: string;
 }
 
 /**
@@ -67,6 +70,7 @@ export function createUserTurnHandler(options: UserTurnHandlerOptions) {
     }
 
     const sttLocale = sttLocaleFromMessage(newMessage);
+    const beforeLedger = state.negotiation?.ledger.length ?? 0;
     const result = await prepareSimulator2UserTurn({
       heard,
       confidence: newMessage.transcriptConfidence,
@@ -83,8 +87,19 @@ export function createUserTurnHandler(options: UserTurnHandlerOptions) {
       hasConsumedLeadHistory: options.hasConsumedLeadHistory,
       agentGender: options.agentGender,
       contactName: options.contactName,
+      callId: options.callId,
     });
     state = result.state;
+    const latest = state.negotiation?.ledger.at(-1);
+    if (options.callId && latest && (state.negotiation?.ledger.length ?? 0) > beforeLedger) {
+      void apiFetch(`/api/calls/${options.callId}/negotiation`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentId: options.agentId ?? '', event: latest }),
+      }).catch((err: unknown) => {
+        console.info(`[NEGOTIATION_ERROR] call_id=${options.callId} reason=${err instanceof Error ? err.message : 'persist failed'}`);
+      });
+    }
     if (result.ttsLocale !== undefined) {
       options.onLanguageLockChange?.(result.ttsLocale);
     }
@@ -134,22 +149,12 @@ function sttLocaleFromMessage(message: ChatMessage): string | null {
 }
 
 async function sayAndStop(ctx: voice.AgentContext, line: string): Promise<never> {
-  try {
-    const handle = ctx.session.say(line, { allowInterruptions: true });
-    await handle.waitForPlayout();
-  } catch {
-    /* session may already be closing */
-  }
+  await speakLine(ctx.session, line, { allowInterruptions: true });
   throw new voice.StopResponse();
 }
 
 async function forcePoliteEnd(ctx: voice.AgentContext, exitLine: string) {
-  try {
-    const handle = ctx.session.say(exitLine, { allowInterruptions: false });
-    await handle.waitForPlayout();
-  } catch {
-    /* session may already be closing */
-  }
+  await speakLine(ctx.session, exitLine, { allowInterruptions: false });
   try {
     ctx.session.shutdown({ drain: true, reason: 'user_initiated' });
   } catch {

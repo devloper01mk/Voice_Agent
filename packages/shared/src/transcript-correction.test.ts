@@ -75,16 +75,16 @@ describe('shouldConfirmUnclearStt', () => {
 });
 
 describe('correctTranscriptForLlm timeout', () => {
-  const prevKey = process.env.GROQ_API_KEY;
+  const prevKey = process.env.OPENAI_API_KEY;
 
   afterEach(() => {
     mock.restoreAll();
-    if (prevKey === undefined) delete process.env.GROQ_API_KEY;
-    else process.env.GROQ_API_KEY = prevKey;
+    if (prevKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = prevKey;
   });
 
-  it('fails open with alias-corrected text when Groq fetch aborts', async () => {
-    process.env.GROQ_API_KEY = 'test-key';
+  it('fails open with alias-corrected text when OpenAI fetch aborts', async () => {
+    process.env.OPENAI_API_KEY = 'test-key';
     mock.method(globalThis, 'fetch', () =>
       Promise.reject(new DOMException('The operation was aborted', 'TimeoutError')),
     );

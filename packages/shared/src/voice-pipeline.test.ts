@@ -1,38 +1,28 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
-  DEFAULT_REALTIME_VOICE,
   DEFAULT_VOICE_PIPELINE,
-  buildRealtimeS2sInstructionSupplement,
-  isOpenaiRealtimePipeline,
+  isGeminiLivePipeline,
   normalizeVoicePipeline,
   resolveRealtimeVoice,
 } from './voice-pipeline.js';
 
 describe('voice-pipeline', () => {
-  it('defaults unknown pipelines to cascaded', () => {
+  it('always normalizes to gemini_live', () => {
     assert.equal(normalizeVoicePipeline(undefined), DEFAULT_VOICE_PIPELINE);
-    assert.equal(normalizeVoicePipeline('nope'), 'cascaded');
-    assert.equal(normalizeVoicePipeline('openai_realtime'), 'openai_realtime');
+    assert.equal(normalizeVoicePipeline('nope'), 'gemini_live');
+    assert.equal(normalizeVoicePipeline('cascaded'), 'gemini_live');
+    assert.equal(normalizeVoicePipeline('openai_realtime'), 'gemini_live');
+    assert.equal(DEFAULT_VOICE_PIPELINE, 'gemini_live');
   });
 
-  it('resolves realtime voices with coral fallback', () => {
-    assert.equal(resolveRealtimeVoice(undefined), DEFAULT_REALTIME_VOICE);
-    assert.equal(resolveRealtimeVoice('coral'), 'coral');
-    assert.equal(resolveRealtimeVoice('  custom-voice  '), 'custom-voice');
+  it('treats all pipelines as Gemini Live', () => {
+    assert.equal(isGeminiLivePipeline('cascaded'), true);
+    assert.equal(isGeminiLivePipeline('openai_realtime'), true);
   });
 
-  it('detects openai realtime pipeline', () => {
-    assert.equal(isOpenaiRealtimePipeline('openai_realtime'), true);
-    assert.equal(isOpenaiRealtimePipeline('cascaded'), false);
-  });
-
-  it('builds S2S instruction supplement for simulator', () => {
-    const note = buildRealtimeS2sInstructionSupplement('coral');
-    assert.match(note, /schedule_callback/);
-    assert.match(note, /Simulator only/i);
-    assert.match(note, /female/i);
-    assert.match(note, /karti hoon|bol rehi hoon/);
-    assert.doesNotMatch(note, /bol rahi hoon/);
+  it('resolves realtime voice with trim and default', () => {
+    assert.equal(resolveRealtimeVoice('  Kore  '), 'Kore');
+    assert.equal(resolveRealtimeVoice(null), 'Kore');
   });
 });

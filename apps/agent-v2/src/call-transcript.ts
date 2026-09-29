@@ -1,6 +1,7 @@
 import { voice } from '@livekit/agents';
 import type { Room } from '@livekit/rtc-node';
 import { stripSystemNotesForDisplay, stripAgentToolNoiseForDisplay } from '@vsa/shared';
+import { apiFetch } from './api-fetch.js';
 
 interface TranscriptLine {
   id: string;
@@ -56,10 +57,9 @@ export function attachCallTranscriptPersist(
 
 async function persistTranscript(callId: string, lines: Map<string, TranscriptLine>) {
   const sorted = [...lines.values()].sort((a, b) => a.timestamp - b.timestamp);
-  const apiUrl = process.env.API_URL ?? 'http://localhost:3001';
   try {
     // Always mark completed so API fires Nexora call.completed webhook (even empty calls).
-    await fetch(`${apiUrl}/api/calls/${callId}`, {
+    await apiFetch(`/api/calls/${callId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

@@ -13,9 +13,7 @@ import { emitTelephonyEvent } from './event-bus.js';
 import { handleTelephonySse } from './events-route.js';
 import { getPendingCall, registerPendingCall, resolveCallId } from './call-registry.js';
 import { dropPrefetchedRuntime, prefetchRuntimeAgent } from './llm-client.js';
-import { warmOutboundOpener } from './opener-warm.js';
 import { getCallSession } from './session-registry.js';
-import { warmTelephonySttForCall, dropWarmedTelephonyStt } from './stt-warm.js';
 import { publicWssUrl } from './ws-server.js';
 import {
   normalizeTelephonyPipelineMode,
@@ -32,6 +30,7 @@ import {
   livekitSipConfigError,
   maskPhone,
   placeLivekitSipOutbound,
+  toE164,
 } from './livekit-sip.js';
 
 export const telephonyRouter = Router();
@@ -204,7 +203,7 @@ telephonyRouter.post('/outbound-call', async (req, res) => {
     toNumber: z.string().min(8).max(20),
     prospectName: z.string().optional(),
     contactEmail: z.string().email().optional().or(z.literal('')),
-    voicePipeline: z.enum(['agent', 'cascaded', 'openai_realtime', 'gemini_live']).optional(),
+    voicePipeline: z.enum(['agent', 'gemini_live']).optional(),
     realtimeS2sConfig: z.record(z.string(), z.unknown()).optional(),
     /** acefone = legacy Voice Bot WSS; livekit_sip = Simulator 2.0 agent-v2 path. */
     transport: z.enum(['acefone', 'livekit_sip']).optional(),
@@ -282,53 +281,32 @@ telephonyRouter.post('/outbound-call', async (req, res) => {
 
     const pipelineMode = normalizeTelephonyPipelineMode(parsed.data.voicePipeline);
     const appliedPipeline = resolveTelephonyAppliedPipeline(pipelineMode, agent.voicePipeline);
-    const voicePipeline = normalizeVoicePipeline(
-      appliedPipeline === 'openai_realtime' || appliedPipeline === 'gemini_live'
-        ? appliedPipeline
-        : agent.voicePipeline,
-    );
+    const voicePipeline = normalizeVoicePipeline(appliedPipeline);
 
-    if (voicePipeline === 'openai_realtime' && !process.env.OPENAI_API_KEY?.trim()) {
-      return res.status(400).json({
-        error: 'OPENAI_API_KEY is required for OpenAI Realtime S2S on LiveKit SIP calls.',
-      });
-    }
-    if (
-      voicePipeline === 'gemini_live' &&
-      !process.env.GEMINI_API_KEY?.trim() &&
-      !process.env.GOOGLE_API_KEY?.trim()
-    ) {
+    if (!process.env.GEMINI_API_KEY?.trim() && !process.env.GOOGLE_API_KEY?.trim()) {
       return res.status(400).json({
         error: 'GEMINI_API_KEY (or GOOGLE_API_KEY) is required for Gemini Live on LiveKit SIP calls.',
       });
     }
 
     const toNumber = normalizePhone(parsed.data.toNumber);
-    const dialNumber =
-      toNumber.length === 10
-        ? `+91${toNumber}`
-        : toNumber.startsWith('+')
-          ? toNumber
-          : `+${toNumber}`;
+    const dialNumber = toE164(toNumber) ?? toNumber;
     const prospectName = parsed.data.prospectName?.trim() || null;
     const contactEmail = parsed.data.contactEmail?.trim() || null;
     const fromNumber =
-      process.env.LIVEKIT_SIP_FROM_NUMBER?.replace(/\D/g, '') ||
-      process.env.ACEFONE_FROM_NUMBER?.replace(/\D/g, '') ||
+      toE164(process.env.LIVEKIT_SIP_FROM_NUMBER) ||
+      toE164(process.env.ACEFONE_FROM_NUMBER) ||
       null;
 
-    const realtimeS2sConfig =
-      voicePipeline === 'openai_realtime' || voicePipeline === 'gemini_live'
-        ? normalizeRealtimeS2sUserConfig(
-            {
-              ...((agent.realtimeS2sConfig && typeof agent.realtimeS2sConfig === 'object'
-                ? agent.realtimeS2sConfig
-                : {}) as Partial<RealtimeS2sUserConfig>),
-              ...((parsed.data.realtimeS2sConfig ?? {}) as Partial<RealtimeS2sUserConfig>),
-            },
-            voicePipeline,
-          )
-        : undefined;
+    const realtimeS2sConfig = normalizeRealtimeS2sUserConfig(
+      {
+        ...((agent.realtimeS2sConfig && typeof agent.realtimeS2sConfig === 'object'
+          ? agent.realtimeS2sConfig
+          : {}) as Partial<RealtimeS2sUserConfig>),
+        ...((parsed.data.realtimeS2sConfig ?? {}) as Partial<RealtimeS2sUserConfig>),
+      },
+      voicePipeline,
+    );
 
     const roomName = `call-v2-${agent.id}-${Date.now()}`;
     const call = await prisma.call.create({
@@ -498,30 +476,40 @@ telephonyRouter.post('/outbound-call', async (req, res) => {
     agent.voicePipeline,
   );
 
-  if (appliedPipeline === 'openai_realtime' && !process.env.OPENAI_API_KEY?.trim()) {
+  if (!process.env.GEMINI_API_KEY?.trim() && !process.env.GOOGLE_API_KEY?.trim()) {
     return res.status(400).json({
-      error: 'OPENAI_API_KEY is required for OpenAI Realtime S2S on phone calls.',
-    });
-  }
-
-  if (appliedPipeline === 'gemini_live' && !process.env.GEMINI_API_KEY?.trim() && !process.env.GOOGLE_API_KEY?.trim()) {
-    return res.status(400).json({
-      error: 'GEMINI_API_KEY (or GOOGLE_API_KEY) is required for Gemini Live S2S on phone calls.',
+      error: 'GEMINI_API_KEY (or GOOGLE_API_KEY) is required for Gemini Live on phone calls.',
     });
   }
 
   const toNumber = normalizePhone(parsed.data.toNumber);
-  const fromNumber = process.env.ACEFONE_FROM_NUMBER?.replace(/\D/g, '') ?? undefined;
+  // Stored/logged as E.164; the Click-to-Call REST body drops the `+` itself.
+  const fromNumber = toE164(process.env.ACEFONE_FROM_NUMBER);
   const prospectName = parsed.data.prospectName?.trim() || null;
   const contactEmail = parsed.data.contactEmail?.trim() || null;
 
-  const realtimeS2sConfig =
-    appliedPipeline === 'openai_realtime' || appliedPipeline === 'gemini_live'
-      ? normalizeRealtimeS2sUserConfig(
-          (parsed.data.realtimeS2sConfig ?? {}) as Partial<RealtimeS2sUserConfig>,
-          appliedPipeline,
-        )
-      : undefined;
+  const realtimeS2sConfig = normalizeRealtimeS2sUserConfig(
+    {
+      ...((agent.realtimeS2sConfig && typeof agent.realtimeS2sConfig === 'object'
+        ? agent.realtimeS2sConfig
+        : {}) as Partial<RealtimeS2sUserConfig>),
+      ...(agent.realtimeVoice ? { voice: agent.realtimeVoice } : {}),
+      ...((parsed.data.realtimeS2sConfig ?? {}) as Partial<RealtimeS2sUserConfig>),
+    },
+    appliedPipeline,
+  );
+
+  if (realtimeS2sConfig) {
+    console.info(
+      '[telephony] Acefone outbound S2S from Studio',
+      JSON.stringify({
+        agentId: agent.id,
+        appliedPipeline,
+        model: realtimeS2sConfig.model,
+        voice: realtimeS2sConfig.voice,
+      }),
+    );
+  }
 
   const telephonySession: TelephonyCallSessionPayload = {
     pipelineMode,
@@ -556,27 +544,19 @@ telephonyRouter.post('/outbound-call', async (req, res) => {
     voicePipeline: pipelineMode,
     createdAt: Date.now(),
   });
-  const agentPrefetch = prefetchRuntimeAgent(call.id, agent.id, {
+  prefetchRuntimeAgent(call.id, agent.id, {
     prospectName: prospectName ?? undefined,
     contactPhone: toNumber,
     contactEmail: contactEmail ?? undefined,
     direction: 'outbound',
   });
-  warmOutboundOpener(call.id, agentPrefetch, prospectName ?? undefined);
-  if (appliedPipeline !== 'openai_realtime' && appliedPipeline !== 'gemini_live') {
-    warmTelephonySttForCall(call.id, {
-      languages: agent.voiceLanguages,
-      sttProvider: agent.sttProvider,
-      sttModel: agent.sttModel,
-    });
-  }
 
   emitTelephonyEvent(call.id, { type: 'status', status: 'initiating' });
   emitTelephonyEvent(call.id, {
     type: 'log',
     level: 'info',
     category: 'smartflo',
-    message: `Placing outbound call to ${maskPhone(toNumber)} (pipeline: ${appliedPipeline}${pipelineMode === 'cascaded' || pipelineMode === 'openai_realtime' || pipelineMode === 'gemini_live' ? ', forced' : ''})`,
+    message: `Placing outbound call to ${maskPhone(toNumber)} (pipeline: ${appliedPipeline}${pipelineMode === 'gemini_live' ? ', forced' : ''})`,
   });
   console.info(
     'OUTBOUND_CALL_REQUEST',
@@ -604,7 +584,6 @@ telephonyRouter.post('/outbound-call', async (req, res) => {
 
     if (!result.success) {
       dropPrefetchedRuntime(call.id);
-      dropWarmedTelephonyStt(call.id);
       await prisma.call.update({
         where: { id: call.id },
         data: { status: 'failed', endedAt: new Date() },
@@ -653,7 +632,6 @@ telephonyRouter.post('/outbound-call', async (req, res) => {
     });
   } catch (err) {
     dropPrefetchedRuntime(call.id);
-    dropWarmedTelephonyStt(call.id);
     await prisma.call.update({
       where: { id: call.id },
       data: { status: 'failed', endedAt: new Date() },

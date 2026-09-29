@@ -62,7 +62,7 @@ export function buildCallPurposeSystemNote(
     `Restate in one sentence: you called from ${productName} as a follow-up to help them choose / continue their enquiry. ` +
     sourceLine +
     `Do NOT repeat your full opener or re-introduce yourself from scratch. ` +
-    `Then ask ONE next-step question (price by city, or test drive). ` +
+    `Then ask ONE next-step question about their need or the next step for ${productName}. ` +
     `NEVER say you are closing the call. NEVER call end_call.]`
   );
 }
@@ -136,11 +136,11 @@ export function buildOffTopicRedirectSystemNote(options: {
       `FORBIDDEN openings/patterns this call (do not reuse): ` +
       `"I'm here for ${productName}", "I only help with …", ` +
       `"I can't help with this topic / personal matters", "Maaf kijiye / Sorry I can't comment", ` +
-      `or the same model/price/comparison/test-drive laundry list every turn. ` +
+      `or the same offering/price/comparison laundry list every turn. ` +
       `DO: vary the opening (not always "Sorry"); briefly decline ONLY true personal/flirty/medical-about-you topics; ` +
-      `if the transcript might be a car rating / reliability / service mishear, ask ONE short clarify instead of refusing. ` +
+      `if the transcript might be a product rating / reliability / service mishear, ask ONE short clarify instead of refusing. ` +
       `Then ask ONE fresh ${productName} question (vary each turn). ` +
-      `Never treat brand complaints, Google ratings, gearbox, warranty, or free service questions as personal.]`
+      `Never treat brand complaints, ratings, warranty, or service questions as personal.]`
     );
   }
 
@@ -150,10 +150,10 @@ export function buildOffTopicRedirectSystemNote(options: {
     `FORBIDDEN openings/patterns this call (do not reuse): ` +
     `"Main ${productName} ke liye hoon", "Main sirf … pe help karti hoon", ` +
     `"is topic / personal baaton par help nahi kar sakti", "Maaf kijiye, us subject/topic par…", ` +
-    `or the same model/price/comparison/test-drive laundry list every turn. ` +
+    `or the same offering/price/comparison laundry list every turn. ` +
     `DO: vary the opening (not always "Maaf kijiye" or "Ji"); briefly decline ONLY true personal/flirty/medical-about-you topics; ` +
-    `if transcript maybe rating / gearbox / kitne services mishear, ask ONE short clarify instead of refusing. ` +
+    `if transcript maybe rating / service / warranty mishear, ask ONE short clarify instead of refusing. ` +
     `Then ask ONE fresh ${productName} question (vary each turn). ` +
-    `Never treat brand complaints, Google ratings, gearbox, warranty, or free service questions as personal.]`
+    `Never treat brand complaints, ratings, warranty, or service questions as personal.]`
   );
 }

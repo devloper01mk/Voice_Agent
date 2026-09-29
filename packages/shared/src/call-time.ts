@@ -122,7 +122,51 @@ export function addIstCalendarDays(
 ): { isoDate: string; dateLabel: string; weekday: string } {
   // Noon UTC avoids DST edge cases; IST has no DST. Use Date.UTC for calendar math.
   const utc = new Date(Date.UTC(year, month - 1, day + deltaDays, 6, 30, 0));
+  const cal = getIstCalendarParts(utc);
+  return { isoDate: cal.isoDate, dateLabel: cal.dateLabel, weekday: cal.weekday };
+}
+
+/** Days from Monday within a Monday–Sunday Indian week (Mon=0 … Sun=6). */
+export function daysFromMonday(weekdayIndex: number): number {
+  return (weekdayIndex + 6) % 7;
+}
+
+export interface IstResolvedDay {
+  year: number;
+  month: number;
+  day: number;
+  weekdayIndex: number;
+  weekday: string;
+  isoDate: string;
+  dateLabel: string;
+}
+
+/**
+ * Resolve a weekday inside an IST Monday-start week.
+ * weekOffset 0 = this week, 1 = next week, 2 = next-to-next week.
+ * targetWeekdayIndex: 0=Sunday … 6=Saturday (same as getIstCalendarParts).
+ */
+export function resolveIstWeekdayInWeek(
+  now: Date,
+  weekOffset: number,
+  targetWeekdayIndex: number,
+): IstResolvedDay {
+  const cal = getIstCalendarParts(now);
+  const delta =
+    -daysFromMonday(cal.weekdayIndex) + weekOffset * 7 + daysFromMonday(targetWeekdayIndex);
+  const utc = new Date(Date.UTC(cal.year, cal.month - 1, cal.day + delta, 6, 30, 0));
   return getIstCalendarParts(utc);
+}
+
+/** Monday and Sunday labels for an IST week offset (0=this, 1=next, 2=next-to-next). */
+export function istWeekBounds(
+  now: Date,
+  weekOffset: number,
+): { monday: IstResolvedDay; sunday: IstResolvedDay } {
+  return {
+    monday: resolveIstWeekdayInWeek(now, weekOffset, 1),
+    sunday: resolveIstWeekdayInWeek(now, weekOffset, 0),
+  };
 }
 
 /** Day-part buckets (IST): morning until noon, afternoon 12–2:59, evening from 3 PM. */
@@ -183,7 +227,7 @@ export function isTimeOfDayGreeting(text: string): boolean {
 
 /**
  * Relative-date resolution + scheduling validation rules for the LLM.
- * Concrete aaj/kal/parso examples are computed from `now` so the model confirms absolute dates.
+ * Concrete aaj/kal/parso and week mappings are computed from `now` (IST Monday–Sunday weeks).
  */
 export function buildRelativeDateRulesPrompt(now: Date = new Date()): string {
   const cal = getIstCalendarParts(now);
@@ -192,21 +236,37 @@ export function buildRelativeDateRulesPrompt(now: Date = new Date()): string {
   const parso = addIstCalendarDays(cal.year, cal.month, cal.day, 2);
   const yesterday = addIstCalendarDays(cal.year, cal.month, cal.day, -1);
 
+  const thisWeek = istWeekBounds(now, 0);
+  const nextWeek = istWeekBounds(now, 1);
+  const next2Week = istWeekBounds(now, 2);
+  const nextTue = resolveIstWeekdayInWeek(now, 1, 2);
+  const next2Tue = resolveIstWeekdayInWeek(now, 2, 2);
+  const next2Thu = resolveIstWeekdayInWeek(now, 2, 4);
+
   return `### Relative dates & scheduling (IST — mandatory)
 - Today is **${aaj.dateLabel}** (\`${aaj.isoDate}\`). Resolve relative words against this date only.
-- Common mappings for **future scheduling** (demo / callback / preferred_time):
+- **Indian calendar weeks are Monday–Sunday IST** (not Sunday-start). Never invent dates; use the mappings below. Never shift a whole date range by one day.
+- Common mappings for **future scheduling** (appointment / callback / preferred_time / stay dates):
   - **aaj / today** → ${aaj.dateLabel}
   - **kal / tomorrow** → ${kal.dateLabel}
   - **parso / day after tomorrow** → ${parso.dateLabel}
   - **yesterday / kal** (past sense) → ${yesterday.dateLabel} — only if caller is talking about a past event, not booking
-- Weekday alone ("Monday", "somvaar"): pick the **next** occurrence of that weekday on/after today (not last week), unless they clearly mean a past event.
-- **Booking hours (hard rule):** demos / test drives / simulator visits are only **Monday–Saturday, 10 AM – 7 PM IST**. Sunday is closed.
-  - If the caller asks for a time **before 10 AM** (e.g. 8 baje, 9 AM, subah 9) or **at/after 7 PM** (e.g. 7 PM, 8 baje shaam, 9 PM), do **NOT** call capture_demo_lead yet.
-  - Politely say that slot is outside booking hours, then offer 2–3 times **inside** 10 AM–7 PM (e.g. 10 AM, 11 AM, 3 PM). Only save after they pick a valid time.
+- **Week mappings (computed for this call — use these exact dates):**
+  - **This week** (Mon–Sun): ${thisWeek.monday.dateLabel} → ${thisWeek.sunday.dateLabel}
+  - **Next week** (Mon–Sun): ${nextWeek.monday.dateLabel} → ${nextWeek.sunday.dateLabel}
+  - **Next to next week** (Mon–Sun): ${next2Week.monday.dateLabel} → ${next2Week.sunday.dateLabel}
+  - **next week Tuesday** → ${nextTue.dateLabel} (\`${nextTue.isoDate}\`)
+  - **next to next week Tuesday** → ${next2Tue.dateLabel} (\`${next2Tue.isoDate}\`)
+  - **next to next week Tuesday se Thursday** → confirm **${next2Tue.dateLabel}** through **${next2Thu.dateLabel}** (not the day after)
+- Same rules for Hinglish: "agle hafte" = next week; "agle agle hafte" / "next to next" = next to next week.
+- Weekday alone ("Monday", "somvaar") **without** next/next-to-next week: pick the **next** occurrence of that weekday on/after today (not last week), unless they clearly mean a past event.
+- **Booking hours:** follow business hours from Product Knowledge / Booking policy notes, and the save tool's hours/full-slot errors. If a requested time is outside them, politely say so and offer 2–3 valid times. Only save after they pick one.
   - "Subah" without a clock time → default to **10 AM** (not 8 or 9). "Shaam" without a clock → default to **5 PM** (not 8 PM).
 - **Always confirm** the resolved absolute date/time before saving preferred_time or calling schedule_callback / capture_demo_lead.
   - Example: caller says "parso teen baje" → ask "19 July ko 3 baje — sahi hai?" (use the real resolved date).
+  - Example: caller says "next to next week Tuesday" → ask "${next2Tue.dateLabel} — sahi hai?" (use the mapped date above).
   - English call: "That's 19 July at 3 PM — is that correct?"
+- **Live lookup tools:** when a live lookup tool takes dates, resolve them silently into its args — do not audio-confirm dates before the tool returns.
 - **Past datetime validation (scheduling):** if the resolved demo/callback time is already in the past relative to Now above, do NOT save it. Say it has passed and ask for a future time.
 - Ambiguous "kal" (past vs future): for scheduling assume **tomorrow**; if context is historical, treat as yesterday and confirm.
 - Speak confirmed dates naturally in the active call language (Hinglish: "19 July" / "unnees July"; English: "July 19" / "the 19th of July"). Times still follow language rules ("teen baje" vs "three o'clock" / "3 PM").

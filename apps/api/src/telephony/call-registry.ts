@@ -5,25 +5,59 @@ export interface PendingTelephonyCall {
   fromNumber?: string;
   prospectName?: string;
   contactEmail?: string;
-  /** Simulator-style override: agent studio vs force cascaded / S2S. */
-  voicePipeline?: 'agent' | 'cascaded' | 'openai_realtime' | 'gemini_live';
+  /** Simulator-style override: agent studio vs force Gemini Live. */
+  voicePipeline?: 'agent' | 'gemini_live';
   createdAt: number;
 }
 
+const DEFAULT_PENDING_TTL_MS = 15 * 60 * 1000;
+
 const pending = new Map<string, PendingTelephonyCall>();
 const pendingByCallId = new Map<string, PendingTelephonyCall>();
+
+export function pendingTtlMs(): number {
+  const raw = Number(process.env.TELEPHONY_PENDING_TTL_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_PENDING_TTL_MS;
+}
 
 export function normalizeCallId(id: string): string {
   return id.replace(/[^a-zA-Z0-9]/g, '');
 }
 
+function phoneTail(raw: string): string {
+  const d = raw.replace(/\D/g, '');
+  return d.length >= 10 ? d.slice(-10) : d;
+}
+
+/** Drop expired pending entries (Maps never TTL-cleaned before). */
+export function purgeExpiredPendingCalls(now = Date.now()): number {
+  const cutoff = now - pendingTtlMs();
+  let removed = 0;
+  for (const [callId, entry] of pendingByCallId) {
+    if (entry.createdAt >= cutoff) continue;
+    clearPendingCall(callId);
+    removed += 1;
+  }
+  return removed;
+}
+
 export function registerPendingCall(entry: PendingTelephonyCall): void {
+  purgeExpiredPendingCalls();
   pendingByCallId.set(entry.callId, entry);
   pending.set(entry.callId, entry);
   pending.set(normalizeCallId(entry.callId), entry);
 }
 
+export function clearPendingCall(callId: string): void {
+  const entry = pendingByCallId.get(callId) ?? pending.get(callId) ?? pending.get(normalizeCallId(callId));
+  if (!entry) return;
+  pendingByCallId.delete(entry.callId);
+  pending.delete(entry.callId);
+  pending.delete(normalizeCallId(entry.callId));
+}
+
 export function getPendingCall(callId: string): PendingTelephonyCall | undefined {
+  purgeExpiredPendingCalls();
   return pending.get(callId) ?? pending.get(normalizeCallId(callId));
 }
 
@@ -31,15 +65,16 @@ export function findRecentPendingCall(opts?: {
   toNumber?: string;
   withinMs?: number;
 }): PendingTelephonyCall | undefined {
-  const withinMs = opts?.withinMs ?? 15 * 60 * 1000;
+  purgeExpiredPendingCalls();
+  const withinMs = opts?.withinMs ?? pendingTtlMs();
   const cutoff = Date.now() - withinMs;
-  const toTail = opts?.toNumber?.replace(/\D/g, '').slice(-10);
+  const toTail = opts?.toNumber ? phoneTail(opts.toNumber) : '';
 
   let best: PendingTelephonyCall | undefined;
   for (const entry of pendingByCallId.values()) {
     if (entry.createdAt < cutoff) continue;
     if (toTail) {
-      const entryTail = entry.toNumber.replace(/\D/g, '').slice(-10);
+      const entryTail = phoneTail(entry.toNumber);
       if (entryTail !== toTail) continue;
     }
     if (!best || entry.createdAt > best.createdAt) best = entry;
@@ -47,11 +82,27 @@ export function findRecentPendingCall(opts?: {
   return best;
 }
 
-export function countRecentPendingCalls(withinMs = 15 * 60 * 1000): number {
+export function countRecentPendingCalls(withinMs = pendingTtlMs()): number {
+  purgeExpiredPendingCalls();
   const cutoff = Date.now() - withinMs;
   let count = 0;
   for (const entry of pendingByCallId.values()) {
     if (entry.createdAt >= cutoff) count += 1;
+  }
+  return count;
+}
+
+export function countRecentPendingCallsMatchingTail(
+  toTail: string,
+  withinMs = pendingTtlMs(),
+): number {
+  purgeExpiredPendingCalls();
+  const cutoff = Date.now() - withinMs;
+  const tail = phoneTail(toTail);
+  let count = 0;
+  for (const entry of pendingByCallId.values()) {
+    if (entry.createdAt < cutoff) continue;
+    if (phoneTail(entry.toNumber) === tail) count += 1;
   }
   return count;
 }

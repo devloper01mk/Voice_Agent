@@ -28,12 +28,7 @@ export default function S2sEstimatedUsagePanel({
     usage.outputAudioTokens > 0 ||
     usage.totalTokens > 0;
 
-  const providerLabel =
-    costProvider === 'gemini'
-      ? 'Gemini Live'
-      : costProvider === 'openai_mini'
-        ? 'OpenAI Realtime Mini'
-        : 'OpenAI Realtime';
+  const providerLabel = 'Gemini Live';
 
   if (!hasUsage) {
     return (

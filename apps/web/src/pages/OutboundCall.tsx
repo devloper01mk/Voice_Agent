@@ -3,7 +3,6 @@ import { useSearchParams } from 'react-router-dom';
 import {
   isS2sPipeline,
   normalizeVoicePipeline,
-  type LlmProvider,
   type VoicePipeline,
 } from '@vsa/shared';
 import {
@@ -17,7 +16,6 @@ import {
   listAgents,
 } from '../api';
 import CallSummaryPanel from '../components/CallSummaryPanel';
-import EstimatedUsagePanel from '../components/EstimatedUsagePanel';
 import S2sEstimatedUsagePanel from '../components/S2sEstimatedUsagePanel';
 import LatencyReadout, { formatDuration } from '../components/LatencyReadout';
 import LiveTranscriptPanel from '../components/LiveTranscriptPanel';
@@ -102,17 +100,11 @@ export default function OutboundCallPage() {
 
   const live = useTelephonyEvents(callId);
   const selectedAgent = agents.find((a) => a.id === agentId);
-  const llmProvider: LlmProvider = selectedAgent?.llmProvider === 'groq' ? 'groq' : 'gpt';
   const llmModel = selectedAgent?.llmModel?.trim() || '—';
   const studioPipeline = normalizeVoicePipeline(selectedAgent?.voicePipeline);
   const effectivePipeline = sessionPipeline ?? studioPipeline;
   const s2sActive = isS2sPipeline(effectivePipeline);
-  const pipelineLabel =
-    effectivePipeline === 'openai_realtime'
-      ? 'OpenAI Realtime S2S (Agent Studio)'
-      : effectivePipeline === 'gemini_live'
-        ? 'Gemini Live S2S (Agent Studio)'
-        : 'Cascaded (Agent Studio)';
+  const pipelineLabel = 'Gemini Live S2S (Agent Studio)';
 
   const status = live.status;
   const liveCall = Boolean(callId && status && LIVE_STATUSES.has(status));
@@ -401,8 +393,8 @@ export default function OutboundCallPage() {
             ) : null}
             <p className="sim-agent-state">
               {s2sActive
-                ? `LLM: ${effectivePipeline === 'gemini_live' ? 'Gemini Live' : 'OpenAI Realtime'} (speech-to-speech)`
-                : `LLM: ${llmProvider === 'gpt' ? 'GPT' : 'Groq'} · ${llmModel}`}
+                ? 'LLM: Gemini Live (speech-to-speech)'
+                : `LLM: GPT · ${llmModel}`}
             </p>
             <p className="sim-agent-state">Duration: {formatDuration(durationSec)}</p>
             <p className="sim-agent-state">
@@ -668,14 +660,10 @@ export default function OutboundCallPage() {
                 </div>
               </div>
               <LatencyReadout metrics={displayMetrics} />
-              {s2sActive ? (
-                <S2sEstimatedUsagePanel
-                  metrics={displayMetrics}
-                  provider={effectivePipeline === 'gemini_live' ? 'gemini' : 'openai'}
-                />
-              ) : (
-                <EstimatedUsagePanel metrics={displayMetrics} llmProvider={llmProvider} />
-              )}
+              <S2sEstimatedUsagePanel
+                metrics={displayMetrics}
+                provider="gemini"
+              />
             </section>
           </div>
           <TelephonyLogPanel
@@ -704,16 +692,10 @@ export default function OutboundCallPage() {
           formatDuration={formatDuration}
           latencyReadout={<LatencyReadout metrics={lastSummary.metrics} />}
           usagePanel={
-            s2sActive ||
-            (lastSummary.metrics.totalS2sTokens ?? 0) > 0 ||
-            (lastSummary.metrics.totalS2sInputAudioTokens ?? 0) > 0 ? (
-              <S2sEstimatedUsagePanel
-                metrics={lastSummary.metrics}
-                provider={effectivePipeline === 'gemini_live' ? 'gemini' : 'openai'}
-              />
-            ) : (
-              <EstimatedUsagePanel metrics={lastSummary.metrics} llmProvider={llmProvider} />
-            )
+            <S2sEstimatedUsagePanel
+              metrics={lastSummary.metrics}
+              provider="gemini"
+            />
           }
         />
       ) : null}

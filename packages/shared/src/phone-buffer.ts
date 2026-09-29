@@ -250,18 +250,19 @@ export function buildPhoneProtocolSystemNote(
   const base =
     `[System: PHONE PROTOCOL — Indian sales notepad. BUFFER=${buf} (${state.digits.length}/10, spoken: ${spoken}). ` +
     `Reply in call language (Roman Hinglish if Hinglish call) — NEVER flip to full English mid-call just because digits failed. ` +
-    `Digit read-back uses English digit words only. NEVER invent/add/remove digits to force length 10. ` +
+    `Digit read-back uses English digit words only (pairs like "two two"). NEVER say "double"/"triple". NEVER invent/add/remove digits to force length 10. ` +
     `NEVER default to "please say the full 10-digit number" / "I'm still not getting…" when BUFFER has digits — ack what you have, ask only for the rest.]`;
 
   switch (kind) {
     case 'partial':
       return (
-        `${base} ACTION: Ack heard digits in English words ("${spoken}"), then ask ONLY for the remaining ${remain} digit(s) — e.g. "Theek hai — ${spoken} sun liya. Aage ke ${remain} digits boliye." Do NOT wipe the notepad.`
+        `${base} ACTION: Ack heard digits in English words EXACTLY ("${spoken}"), then ask ONLY for the remaining ${remain} digit(s) — e.g. "Theek hai — ${spoken} sun liya. Aage ke ${remain} digits boliye." Never "double"/"triple". Do NOT wipe the notepad.`
       );
     case 'complete':
     case 'confirm_ready':
       return (
-        `${base} ACTION: Read back in pairs: "${readBack}" — then "Yeh number sahi hai?" Wait for haan/yes before phone_confirmed / save.`
+        `${base} ACTION: Speak these digit words VERBATIM (do not paraphrase): "${readBack}" — then "Yeh number sahi hai?" ` +
+        `Never say double/triple (22 → "two two", not "double two"; a single 3 → "three", not "double three"). Wait for haan/yes before phone_confirmed / save.`
       );
     case 'too_long':
       return (

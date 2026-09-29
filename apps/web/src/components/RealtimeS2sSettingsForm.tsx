@@ -4,19 +4,11 @@ import {
   GEMINI_LIVE_VOICE_OPTIONS,
   GEMINI_31_BRIGHT_VOICES,
   GEMINI_31_WARM_VOICE_HINTS,
-  REALTIME_S2S_EAGERNESS_OPTIONS,
-  REALTIME_S2S_MODEL_OPTIONS,
-  REALTIME_S2S_NOISE_REDUCTION_OPTIONS,
-  REALTIME_S2S_TRANSCRIPTION_OPTIONS,
   REALTIME_S2S_TURN_MODE_OPTIONS,
-  REALTIME_VOICE_OPTIONS,
-  defaultGeminiLiveS2sUserConfig,
-  defaultRealtimeS2sUserConfig,
   estimateRealtimeS2sCostInr,
   isGemini31LiveModel,
   resolveGeminiLiveModel,
   type RealtimeS2sUserConfig,
-  type S2sProvider,
   type VoicePipeline,
 } from '@vsa/shared';
 
@@ -24,7 +16,7 @@ type Props = {
   config: RealtimeS2sUserConfig;
   onChange: (config: RealtimeS2sUserConfig) => void;
   disabled?: boolean;
-  /** When set, locks provider to the pipeline (hides provider picker). */
+  /** Kept for call-site compat — always Gemini Live. */
   pipeline?: VoicePipeline;
 };
 
@@ -42,29 +34,9 @@ function voiceOptionLabel(v: { label: string; gender?: string; hint?: string }) 
   return `${v.label}${tag}${v.hint ? ` — ${v.hint}` : ''}`;
 }
 
-function providerFromPipeline(pipeline?: VoicePipeline): S2sProvider | null {
-  if (pipeline === 'gemini_live') return 'gemini';
-  if (pipeline === 'openai_realtime') return 'openai';
-  return null;
-}
-
-export default function RealtimeS2sSettingsForm({ config, onChange, disabled, pipeline }: Props) {
-  const lockedProvider = providerFromPipeline(pipeline);
-  const provider = lockedProvider ?? config.provider;
-  const isGemini = provider === 'gemini';
-  const semanticTurn = config.turnDetectionMode === 'semantic';
-
-  const femaleVoices = isGemini
-    ? GEMINI_LIVE_VOICE_OPTIONS.filter((v) => v.gender === 'female')
-    : REALTIME_VOICE_OPTIONS.filter((v) => v.gender === 'female');
-  const otherVoices = isGemini
-    ? GEMINI_LIVE_VOICE_OPTIONS.filter((v) => v.gender !== 'female')
-    : REALTIME_VOICE_OPTIONS.filter((v) => v.gender !== 'female');
-
-  function switchProvider(next: S2sProvider) {
-    if (lockedProvider) return;
-    onChange(next === 'gemini' ? defaultGeminiLiveS2sUserConfig() : defaultRealtimeS2sUserConfig());
-  }
+export default function RealtimeS2sSettingsForm({ config, onChange, disabled }: Props) {
+  const femaleVoices = GEMINI_LIVE_VOICE_OPTIONS.filter((v) => v.gender === 'female');
+  const otherVoices = GEMINI_LIVE_VOICE_OPTIONS.filter((v) => v.gender !== 'female');
 
   return (
     <div className="sim-s2s-settings">
@@ -72,31 +44,16 @@ export default function RealtimeS2sSettingsForm({ config, onChange, disabled, pi
         Est. API cost: <strong>{estimateRealtimeS2sCostInr(config)}/min</strong> (varies by talk time)
       </p>
 
-      {!lockedProvider && (
-        <div className="studio-field">
-          <label htmlFor="s2sProvider">S2S provider</label>
-          <select
-            id="s2sProvider"
-            value={provider}
-            disabled={disabled}
-            onChange={(e) => switchProvider(e.target.value as S2sProvider)}
-          >
-            <option value="openai">OpenAI Realtime</option>
-            <option value="gemini">Gemini Live</option>
-          </select>
-        </div>
-      )}
-
       <div className="studio-field-grid">
         <div className="studio-field">
           <label htmlFor="s2sModel">Model</label>
           <select
             id="s2sModel"
-            value={isGemini ? resolveGeminiLiveModel(config.model) : config.model}
+            value={resolveGeminiLiveModel(config.model)}
             disabled={disabled}
             onChange={(e) => {
               const model = e.target.value;
-              if (isGemini && isGemini31LiveModel(model) && GEMINI_31_BRIGHT_VOICES.has(config.voice)) {
+              if (isGemini31LiveModel(model) && GEMINI_31_BRIGHT_VOICES.has(config.voice)) {
                 onChange({
                   ...config,
                   model,
@@ -107,7 +64,7 @@ export default function RealtimeS2sSettingsForm({ config, onChange, disabled, pi
               updateField(config, onChange, 'model', model);
             }}
           >
-            {(isGemini ? GEMINI_LIVE_MODEL_OPTIONS : REALTIME_S2S_MODEL_OPTIONS).map((o) => (
+            {GEMINI_LIVE_MODEL_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>
                 {o.label}
                 {'hint' in o && o.hint ? ` — ${o.hint}` : ''}
@@ -116,40 +73,22 @@ export default function RealtimeS2sSettingsForm({ config, onChange, disabled, pi
           </select>
         </div>
 
-        {isGemini ? (
-          <div className="studio-field">
-            <label htmlFor="s2sLanguage">Speech language</label>
-            <select
-              id="s2sLanguage"
-              value={config.languageCode}
-              disabled={disabled}
-              onChange={(e) => updateField(config, onChange, 'languageCode', e.target.value)}
-            >
-              {GEMINI_LIVE_LANGUAGE_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                  {'hint' in o && o.hint ? ` — ${o.hint}` : ''}
-                </option>
-              ))}
-            </select>
-          </div>
-        ) : (
-          <div className="studio-field">
-            <label htmlFor="s2sTranscriptModel">User transcript model</label>
-            <select
-              id="s2sTranscriptModel"
-              value={config.transcriptionModel}
-              disabled={disabled}
-              onChange={(e) => updateField(config, onChange, 'transcriptionModel', e.target.value)}
-            >
-              {REALTIME_S2S_TRANSCRIPTION_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
+        <div className="studio-field">
+          <label htmlFor="s2sLanguage">Speech language</label>
+          <select
+            id="s2sLanguage"
+            value={config.languageCode}
+            disabled={disabled}
+            onChange={(e) => updateField(config, onChange, 'languageCode', e.target.value)}
+          >
+            {GEMINI_LIVE_LANGUAGE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+                {'hint' in o && o.hint ? ` — ${o.hint}` : ''}
+              </option>
+            ))}
+          </select>
+        </div>
 
         <div className="studio-field">
           <label htmlFor="s2sVoice">Voice (female recommended)</label>
@@ -175,56 +114,24 @@ export default function RealtimeS2sSettingsForm({ config, onChange, disabled, pi
             </optgroup>
           </select>
           <p className="studio-field-hint">
-            {isGemini ? (
-              isGemini31LiveModel(config.model) ? (
-                <>
-                  Gemini 3.1 often sounds brighter/higher. Prefer{' '}
-                  <strong>{GEMINI_31_WARM_VOICE_HINTS.slice(0, 4).join(', ')}</strong> — avoid thin
-                  bright voices
-                  {GEMINI_31_BRIGHT_VOICES.has(config.voice)
-                    ? ` (current: ${config.voice})`
-                    : ''}
-                  . Live API has no pitch slider.
-                </>
-              ) : (
-                <>
-                  <strong>Kore</strong> or <strong>Aoede</strong> for female Gemini Live. Hindi/Hinglish
-                  ke liye language <strong>hi-IN</strong> set karo — accent global HD hai, pure desi nahi.
-                </>
-              )
+            {isGemini31LiveModel(config.model) ? (
+              <>
+                Gemini 3.x Live can sound brighter/higher. Prefer{' '}
+                <strong>{GEMINI_31_WARM_VOICE_HINTS.slice(0, 4).join(', ')}</strong> — avoid thin
+                bright voices
+                {GEMINI_31_BRIGHT_VOICES.has(config.voice)
+                  ? ` (current: ${config.voice})`
+                  : ''}
+                . Live API has no pitch slider.
+              </>
             ) : (
               <>
-                <strong>Coral</strong> or <strong>Shimmer</strong> for female S2S. Accent US/generic hai —
-                Indian female Hinglish ke liye <strong>Cascaded + Cartesia (Arushi)</strong> use karo.
+                <strong>Kore</strong> or <strong>Aoede</strong> for female Gemini Live. Hindi/Hinglish
+                ke liye language <strong>hi-IN</strong> set karo — accent global HD hai, pure desi nahi.
               </>
             )}
           </p>
         </div>
-
-        {!isGemini && (
-          <div className="studio-field">
-            <label htmlFor="s2sNoise">Noise reduction</label>
-            <select
-              id="s2sNoise"
-              value={config.noiseReduction}
-              disabled={disabled}
-              onChange={(e) =>
-                updateField(
-                  config,
-                  onChange,
-                  'noiseReduction',
-                  e.target.value as RealtimeS2sUserConfig['noiseReduction'],
-                )
-              }
-            >
-              {REALTIME_S2S_NOISE_REDUCTION_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
       </div>
 
       <div className="studio-field">
@@ -292,99 +199,72 @@ export default function RealtimeS2sSettingsForm({ config, onChange, disabled, pi
           </select>
         </div>
 
-        {semanticTurn && !isGemini ? (
-          <div className="studio-field">
-            <label htmlFor="s2sEagerness">Eagerness</label>
-            <select
-              id="s2sEagerness"
-              value={config.turnDetectionEagerness}
-              disabled={disabled}
-              onChange={(e) =>
-                updateField(
-                  config,
-                  onChange,
-                  'turnDetectionEagerness',
-                  e.target.value as RealtimeS2sUserConfig['turnDetectionEagerness'],
-                )
-              }
-            >
-              {REALTIME_S2S_EAGERNESS_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        ) : (
-          <>
-            <div className="studio-field">
-              <label htmlFor="s2sThreshold">
-                Threshold{' '}
-                <span className="studio-field-value">{config.turnDetectionThreshold.toFixed(2)}</span>
-              </label>
-              <input
-                id="s2sThreshold"
-                type="range"
-                min={0}
-                max={1}
-                step={0.01}
-                disabled={disabled}
-                value={config.turnDetectionThreshold}
-                onChange={(e) =>
-                  updateField(config, onChange, 'turnDetectionThreshold', Number(e.target.value))
-                }
-              />
-            </div>
+        <div className="studio-field">
+          <label htmlFor="s2sThreshold">
+            Threshold{' '}
+            <span className="studio-field-value">{config.turnDetectionThreshold.toFixed(2)}</span>
+          </label>
+          <input
+            id="s2sThreshold"
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            disabled={disabled}
+            value={config.turnDetectionThreshold}
+            onChange={(e) =>
+              updateField(config, onChange, 'turnDetectionThreshold', Number(e.target.value))
+            }
+          />
+        </div>
 
-            <div className="studio-field">
-              <label htmlFor="s2sPrefix">
-                Prefix padding{' '}
-                <span className="studio-field-value">{config.turnDetectionPrefixPaddingMs} ms</span>
-              </label>
-              <input
-                id="s2sPrefix"
-                type="range"
-                min={0}
-                max={2000}
-                step={50}
-                disabled={disabled}
-                value={config.turnDetectionPrefixPaddingMs}
-                onChange={(e) =>
-                  updateField(
-                    config,
-                    onChange,
-                    'turnDetectionPrefixPaddingMs',
-                    Number(e.target.value),
-                  )
-                }
-              />
-            </div>
+        <div className="studio-field">
+          <label htmlFor="s2sPrefix">
+            Prefix padding{' '}
+            <span className="studio-field-value">{config.turnDetectionPrefixPaddingMs} ms</span>
+          </label>
+          <input
+            id="s2sPrefix"
+            type="range"
+            min={0}
+            max={2000}
+            step={50}
+            disabled={disabled}
+            value={config.turnDetectionPrefixPaddingMs}
+            onChange={(e) =>
+              updateField(
+                config,
+                onChange,
+                'turnDetectionPrefixPaddingMs',
+                Number(e.target.value),
+              )
+            }
+          />
+        </div>
 
-            <div className="studio-field">
-              <label htmlFor="s2sSilence">
-                Silence duration{' '}
-                <span className="studio-field-value">{config.turnDetectionSilenceDurationMs} ms</span>
-              </label>
-              <input
-                id="s2sSilence"
-                type="range"
-                min={0}
-                max={3000}
-                step={50}
-                disabled={disabled}
-                value={config.turnDetectionSilenceDurationMs}
-                onChange={(e) =>
-                  updateField(
-                    config,
-                    onChange,
-                    'turnDetectionSilenceDurationMs',
-                    Number(e.target.value),
-                  )
-                }
-              />
-            </div>
-          </>
-        )}
+        <div className="studio-field">
+          <label htmlFor="s2sSilence">
+            Silence duration{' '}
+            <span className="studio-field-value">{config.turnDetectionSilenceDurationMs} ms</span>
+          </label>
+          <input
+            id="s2sSilence"
+            type="range"
+            min={0}
+            max={3000}
+            step={50}
+            disabled={disabled}
+            value={config.turnDetectionSilenceDurationMs}
+            onChange={(e) =>
+              updateField(
+                config,
+                onChange,
+                'turnDetectionSilenceDurationMs',
+                Number(e.target.value),
+              )
+            }
+          />
+        </div>
       </div>
 
       <div className="studio-field studio-field--toggle">
@@ -399,7 +279,7 @@ export default function RealtimeS2sSettingsForm({ config, onChange, disabled, pi
           />
         </label>
         <p className="studio-field-hint">
-          UI preference — {isGemini ? 'Gemini Live' : 'OpenAI Realtime'} idle timeout is not wired yet.
+          UI preference — Gemini Live idle timeout is not wired yet.
         </p>
       </div>
     </div>

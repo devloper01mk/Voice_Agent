@@ -126,6 +126,7 @@ export function digitsToEnglishWords(digits: string): string {
  * Format phone for spoken read-back as digit words in pairs.
  * English: 9078802278 → "nine zero, seven eight, …"
  * Hindi:   9078802278 → "nau sunya, saat aath, …"
+ * Never uses "double"/"triple" — consecutive same digits are repeated words ("two two").
  */
 export function formatPhoneForSpeech(
   digits: string,

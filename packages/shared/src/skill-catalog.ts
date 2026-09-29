@@ -44,11 +44,11 @@ export const BRAIN_MAP: BrainMapItem[] = [
 
 export const RUNTIME_CODE_ITEMS: BrainMapItem[] = [
   { id: 'hold-mute', label: 'Hold mute + check-in', hemisphere: 'left', icon: '⏸️', description: 'Side talk ignored; short Ji ack; exploring mute (call-hold.ts, call-patience.ts)' },
-  { id: 'stt-filter', label: 'STT confidence filter', hemisphere: 'left', icon: '🎙️', description: 'Low-quality finals dropped (azure-stt.ts)' },
+  { id: 'stt-filter', label: 'STT confidence filter', hemisphere: 'left', icon: '🎙️', description: 'Low-quality finals dropped (legacy cascaded STT)' },
   { id: 'off-topic-wrap', label: 'Off-topic strike counter', hemisphere: 'left', icon: '🚫', description: 'Force end after max redirects (user-turn-handler)' },
   { id: 'barge-in', label: 'Barge-in / interruption', hemisphere: 'left', icon: '🔀', description: 'Interrupt only after sustained caller speech (no false-interruption resume)' },
   { id: 'noise-nc', label: 'Noise cancellation', hemisphere: 'left', icon: '🔇', description: 'LiveKit BVC on inbound audio' },
-  { id: 'transcript-fix', label: 'STT correction pass', hemisphere: 'left', icon: '✏️', description: 'Groq fast model fixes garbled STT' },
+  { id: 'transcript-fix', label: 'STT correction pass', hemisphere: 'left', icon: '✏️', description: 'OpenAI fast model fixes garbled STT' },
 ];
 
 /** Editable skill fields for Studio UI — path uses dot notation into SkillsConfig. */
@@ -105,8 +105,8 @@ export const SKILL_FIELD_DEFS: SkillFieldDef[] = [
   { path: 'runtime.holdAckLine', label: 'Hold ack line', category: 'runtime', group: 'Timers', hint: 'One short word when caller asks to hold (e.g. Ji.)', multiline: true },
   { path: 'runtime.exploringSilenceMs', label: 'Exploring silence (ms)', category: 'runtime', group: 'Timers', hint: 'Mute after hmm/exploring turns' },
   { path: 'runtime.holdSoftCheckinMs', label: 'Hold check-in (ms)', category: 'runtime', group: 'Timers', hint: 'Soft check-in while caller on hold' },
-  { path: 'runtime.silenceFirstPromptSec', label: 'Silence first prompt (sec)', category: 'runtime', group: 'Timers', hint: 'No user reply for this long → check-in line (default 120s)' },
-  { path: 'runtime.silenceEndSec', label: 'Silence end call (sec)', category: 'runtime', group: 'Timers', hint: 'Still silent after this total → goodbye + end (default 150s)' },
+  { path: 'runtime.silenceFirstPromptSec', label: 'Silence check gap (sec)', category: 'runtime', group: 'Timers', hint: 'No human reply for this long → check-in (phone uses 15s × 3)' },
+  { path: 'runtime.silenceEndSec', label: 'Silence end call (sec)', category: 'runtime', group: 'Timers', hint: 'Three missed checks (~45s) → formal goodbye + hangup' },
   {
     path: 'runtime.leadMemoryRetentionHours',
     label: 'Lead memory retention',

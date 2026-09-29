@@ -1,8 +1,6 @@
 import type { BookingPolicy } from './booking-policy.js';
 
-export type LlmProvider = 'groq' | 'gpt';
-
-export type SttProvider = 'azure' | 'openai' | 'sarvam' | 'google';
+export type LlmProvider = 'gpt';
 
 export type AgentGender = 'female' | 'male';
 
@@ -113,4 +111,9 @@ export interface SkillsConfig {
    * so hotel vs CRM agents can differ without code changes.
    */
   booking?: BookingPolicy;
+  /**
+   * Optional commercial negotiation policy. Absent means understand, explain
+   * verified value, and suggest verified alternatives — never invent a concession.
+   */
+  negotiation?: unknown;
 }

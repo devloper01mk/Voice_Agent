@@ -1,5 +1,5 @@
 /**
- * Nexora intelligence facts/query — live property inventory by **city**.
+ * Nexora intelligence facts/query — live property inventory (Hotel `known`, progressive).
  * Product-agnostic: no brand-specific skill copy. Policies come from API when present.
  */
 
@@ -55,6 +55,13 @@ export type NexoraHotelFactsError = {
   fallback_to_brain?: boolean;
 };
 
+const MISSING_PLACE_ERROR = 'city or state is required';
+/** Spoken only if the agent has not already asked. A second lookup reply is dropped in the voice guard. */
+const MISSING_PLACE_SAY =
+  'Kaunsi city ya state mein stay plan hai?';
+const MISSING_PLACE_HINT =
+  'No city or state was given. If you already asked which city or state, stay silent. Otherwise ask once and wait. Do not call lookup again until they name one.';
+
 const BRAIN_FALLBACK_HINT =
   'Live inventory check failed (API). You may share Product Knowledge for cities/properties that ARE listed there. ' +
   'NEVER say a city has no property / "nahi hai" from Product Knowledge or memory — only after lookup_hotel_availability returns ok:false without fallback_to_brain. ' +
@@ -78,6 +85,8 @@ export const NEXORA_HOTEL_SELECT_FIELDS = [
   'Address',
   'check_in',
   'check_out',
+  'adress',
+  
 ] as const;
 
 function envUrl(): string {
@@ -90,6 +99,7 @@ function envUrl(): string {
 
 function envToken(): string {
   return (
+    process.env.NEXORA_FACTS_QUERY_TOKEN?.trim() ||
     process.env.NEXORA_INGEST_TOKEN?.trim() ||
     process.env.CALL_COMPLETED_WEBHOOK_TOKEN?.trim() ||
     ''
@@ -230,12 +240,27 @@ export function textMentionsKnownHotelCity(raw: string): boolean {
 
 /** First known city mentioned in caller text (English canonical), if any. */
 export function extractKnownHotelCityFromText(raw: string): string | undefined {
+  return extractKnownHotelCitiesFromText(raw)[0];
+}
+
+/** Every known city in the text, in mention order. English canonical names. */
+export function extractKnownHotelCitiesFromText(raw: string): string[] {
   const t = raw.trim();
-  if (!t) return undefined;
+  if (!t) return [];
+  const hits: { index: number; cities: string[] }[] = [];
   for (const alias of REGION_CITY_ALIASES) {
-    if (alias.match.test(t) && alias.cities[0]) return alias.cities[0];
+    const flags = alias.match.flags.replace('g', '');
+    const found = new RegExp(alias.match.source, flags).exec(t);
+    if (found && alias.cities.length) hits.push({ index: found.index, cities: alias.cities });
   }
-  return undefined;
+  hits.sort((a, b) => a.index - b.index);
+  const out: string[] = [];
+  for (const hit of hits) {
+    for (const city of hit.cities) {
+      if (!out.some((x) => x.toLowerCase() === city.toLowerCase())) out.push(city);
+    }
+  }
+  return out;
 }
 
 /**
@@ -333,10 +358,8 @@ export function toNexoraMatchArray(
 }
 
 /**
- * Build Nexora `match` object:
- * - city only → `{ city: ["Rishikesh"] }`
- * - state only → `{ state: ["Uttarakhand"] }`
- * - both → `{ city: ["Rishikesh"], state: ["Uttarakhand"] }`
+ * Build Nexora `match` object (legacy Room index).
+ * Prefer {@link buildNexoraHotelKnown} for the live Hotel facts/query API.
  * Never includes empty strings.
  */
 export function buildNexoraHotelMatch(opts: {
@@ -349,6 +372,107 @@ export function buildNexoraHotelMatch(opts: {
   if (cities) match.city = cities;
   if (states) match.state = states;
   return match;
+}
+
+/** Progressive stay filters for Nexora Hotel `known` (Postman shape — always all keys). */
+export type NexoraHotelKnown = {
+  state?: string | null;
+  /** One city or several. Sent as a string[] when any city is set. */
+  city?: string | string[] | null;
+  date?: string | null;
+  /** One room name, several names, or a cart string ("A + 2x B + C"). */
+  room_type?: string | string[] | null;
+  price_per_night?: string | number | null;
+};
+
+/**
+ * Payload sent to Nexora facts/query `known`.
+ * `city` is "" or a non-empty string[]. `room_type` is "" or a non-empty string[].
+ */
+export type NexoraHotelKnownPayload = {
+  state: string;
+  city: string | string[];
+  date: string;
+  room_type: string | string[];
+  price_per_night: string;
+};
+
+/**
+ * Split spoken/tool room carts into distinct room type names for Nexora `known.room_type`.
+ * Handles arrays, commas, "+", "and"/"aur", and quantity prefixes like "2x" / "do ".
+ * Dedupes by normalized name (order preserved).
+ *
+ * @example
+ * parseStayRoomTypeList('6 Bed Mixed Dorm + 2x 4 Bed Mixed Dorm + Female Dorm + 2x Private Double Room')
+ * // → ['6 Bed Mixed Dorm', '4 Bed Mixed Dorm', 'Female Dorm', 'Private Double Room']
+ */
+export function parseStayRoomTypeList(
+  input?: string | string[] | null,
+): string[] {
+  if (input == null) return [];
+  const rawParts: string[] = [];
+  const pushChunks = (s: string) => {
+    const t = s.trim();
+    if (!t) return;
+    for (const chunk of t.split(/\s*(?:\+|\/|,|;|\band\b|\baur\b)\s*/i)) {
+      const c = chunk.trim();
+      if (c) rawParts.push(c);
+    }
+  };
+  if (Array.isArray(input)) {
+    for (const item of input) pushChunks(String(item ?? ''));
+  } else {
+    pushChunks(String(input));
+  }
+
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const part of rawParts) {
+    // Strip qty only: "2x …", "2 x …", "do/teen/ek …" — never strip leading digits of "6 Bed…"
+    const cleaned = part
+      .replace(/^\d+\s*[x×]\s*/i, '')
+      .replace(
+        /^(?:do|teen|ek|one|two|three)\s+(?=(?:\d+\s*bed|private|female|mixed|dorm|suite|deluxe))/i,
+        '',
+      )
+      .trim();
+    if (!cleaned) continue;
+    const key = cleaned.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(cleaned);
+  }
+  return out;
+}
+
+/**
+ * Build Nexora Hotel `known` object matching the live Postman / curl contract:
+ * always includes state, city, date, room_type, price_per_night.
+ * `city` is "" when unknown, otherwise a non-empty string[] (one or many).
+ * `room_type` is "" when unknown, otherwise a non-empty string[] of exact room names.
+ */
+export function buildNexoraHotelKnown(opts: NexoraHotelKnown): NexoraHotelKnownPayload {
+  const norm = (value?: string | number | null): string => {
+    if (value == null) return '';
+    return String(value).trim();
+  };
+  const rooms = parseStayRoomTypeList(opts.room_type);
+  const cities = toNexoraMatchArray(opts.city);
+  return {
+    state: norm(opts.state),
+    city: cities ?? '',
+    date: norm(opts.date),
+    room_type: rooms.length === 0 ? '' : rooms,
+    price_per_night: norm(opts.price_per_night),
+  };
+}
+
+/** True when at least one known filter is non-empty. */
+export function hasNexoraHotelKnownFilter(known: NexoraHotelKnownPayload): boolean {
+  return Object.values(known).some((v) => {
+    if (Array.isArray(v)) return v.some((x) => Boolean(String(x ?? '').trim()));
+    return Boolean(String(v ?? '').trim());
+  });
 }
 
 /** Ordered unique city candidates for Nexora match.city — English canonical first. */
@@ -404,7 +528,14 @@ function modeNumber(values: number[]): number | undefined {
   return best;
 }
 
-function collectRoomsFromRelated(related: RelatedRow[]): NexoraHotelRoomSummary[] {
+/** True when the row has a real live rate (browse mode often omits price). */
+export function roomHasLiveRate(room: Pick<NexoraHotelRoomSummary, 'price_per_night'>): boolean {
+  return Number.isFinite(room.price_per_night) && room.price_per_night > 0;
+}
+
+function collectRoomsFromFactBags(
+  bags: Record<string, unknown>[],
+): NexoraHotelRoomSummary[] {
   type Acc = {
     room_id: string;
     room_name: string;
@@ -415,13 +546,30 @@ function collectRoomsFromRelated(related: RelatedRow[]): NexoraHotelRoomSummary[
   };
   const byId = new Map<string, Acc>();
 
-  for (const row of related) {
-    const facts = { ...(row.identity ?? {}), ...(row.facts ?? {}) };
-    const roomId = asString(facts.room_id);
-    const roomName = asString(facts.room_name);
-    if (!roomId || !roomName) continue;
-    const beds = asNumber(facts.available_rooms_beds);
-    const price = asNumber(facts.price_per_night);
+  for (const facts of bags) {
+    const roomName =
+      asString(facts.room_name) ||
+      asString(facts.room_type) ||
+      asString(facts.Room_Type) ||
+      asString(facts['Room Type']) ||
+      asString(facts.name);
+    if (!roomName) continue;
+    const roomId =
+      asString(facts.room_id) ||
+      asString(facts.Room_ID) ||
+      `type:${normalizeStayRoomKey(roomName)}`;
+    // Nexora browse/availability packs may use price / available instead of *_per_night / beds.
+    const beds =
+      asNumber(facts.available_rooms_beds) ??
+      asNumber(facts.available) ??
+      asNumber(facts.available_beds) ??
+      asNumber(facts.free) ??
+      asNumber(facts.beds);
+    const price =
+      asNumber(facts.price_per_night) ??
+      asNumber(facts.price) ??
+      asNumber(facts.Price) ??
+      asNumber(facts.rate);
     const discount =
       asNumber(facts.discount) ??
       asNumber(facts['Discount (%)']) ??
@@ -445,20 +593,46 @@ function collectRoomsFromRelated(related: RelatedRow[]): NexoraHotelRoomSummary[
   return [...byId.values()]
     .map((acc): NexoraHotelRoomSummary | null => {
       const price = modeNumber(acc.prices);
-      const beds = acc.beds.length ? Math.max(...acc.beds) : undefined;
+      // Browse mode (city-only): room names without beds/prices — still surface the list.
+      const beds = acc.beds.length
+        ? Math.max(...acc.beds)
+        : 1;
       const discount = modeNumber(acc.discounts) ?? 0;
-      if (price == null || beds == null) return null;
+      if (!acc.room_name.trim()) return null;
       return {
         room_id: acc.room_id,
         room_name: acc.room_name,
         ...(acc.room_type ? { room_type: acc.room_type } : {}),
         available_beds: beds,
-        price_per_night: price,
+        // 0 = listed in browse mode, live rate unknown — do not invent a price.
+        price_per_night: price ?? 0,
         discount_pct: discount,
       };
     })
     .filter((r): r is NexoraHotelRoomSummary => r != null)
-    .sort((a, b) => a.price_per_night - b.price_per_night);
+    .sort((a, b) => {
+      // Priced rooms first (asc), then browse-only names.
+      const ap = roomHasLiveRate(a) ? a.price_per_night : Number.POSITIVE_INFINITY;
+      const bp = roomHasLiveRate(b) ? b.price_per_night : Number.POSITIVE_INFINITY;
+      if (ap !== bp) return ap - bp;
+      return a.room_name.localeCompare(b.room_name);
+    });
+}
+
+function collectRoomsFromRelated(related: RelatedRow[]): NexoraHotelRoomSummary[] {
+  return collectRoomsFromFactBags(
+    related.map((row) => ({ ...(row.identity ?? {}), ...(row.facts ?? {}) })),
+  );
+}
+
+/** Rooms from related rows, or Hotel identity/facts when related is empty. */
+function collectRoomsFromMatchRow(row: Record<string, unknown>): NexoraHotelRoomSummary[] {
+  const relatedRows = Array.isArray(row.related) ? (row.related as RelatedRow[]) : [];
+  const fromRelated = collectRoomsFromRelated(relatedRows);
+  if (fromRelated.length) return fromRelated;
+  const identity = (row.identity ?? {}) as Record<string, unknown>;
+  const facts = (row.facts ?? {}) as Record<string, unknown>;
+  return collectRoomsFromFactBags([{ ...identity, ...facts }]);
 }
 
 function extractPolicies(
@@ -540,6 +714,11 @@ export type NexoraMatchPrefer = {
   hotel?: string;
   /** e.g. "Suite" → prefer property that has Premium Suite */
   room?: string;
+  /**
+   * Multi-room carts (e.g. Female Dorm + Premium Suite across Hostel + Resort).
+   * When set with 2+ names, inventory is merged from every match that covers a wanted room.
+   */
+  rooms?: string[];
 };
 
 function identityPreferBoost(
@@ -610,35 +789,100 @@ export function summarizeNexoraHotelFactsPayload(
     score: number;
     hasPreferredRoom: boolean;
   };
+  const wantedPreferRooms = parseStayRoomTypeList(
+    prefer?.rooms?.length ? prefer.rooms : prefer?.room,
+  );
+  const primaryRoomHint = wantedPreferRooms[0] ?? prefer?.room;
   const scoredMatches: ScoredMatch[] = [];
   for (const m of matches) {
     const row = m as Record<string, unknown>;
-    const relatedRows = Array.isArray(row.related) ? (row.related as RelatedRow[]) : [];
-    const scored = collectRoomsFromRelated(relatedRows);
+    const scored = collectRoomsFromMatchRow(row);
     const identity = (row.identity ?? {}) as Record<string, unknown>;
     const hasPreferredRoom = Boolean(
-      prefer?.room && matchStayRoom(scored, prefer.room),
+      primaryRoomHint && matchStayRoom(scored, primaryRoomHint),
     );
     scoredMatches.push({
       row,
       rooms: scored,
-      score: scored.length + identityPreferBoost(identity, scored, prefer),
+      score:
+        scored.length +
+        identityPreferBoost(
+          identity,
+          scored,
+          prefer
+            ? { ...prefer, room: primaryRoomHint ?? prefer.room }
+            : undefined,
+        ),
       hasPreferredRoom,
     });
   }
-  // Hard lock: if any match has the requested room type, never pick a property without it.
-  const roomLocked = prefer?.room
-    ? scoredMatches.filter((s) => s.hasPreferredRoom)
-    : [];
-  const pool = roomLocked.length ? roomLocked : scoredMatches;
-  let chosen: Record<string, unknown> = pool[0]?.row ?? (matches[0] as Record<string, unknown>);
-  let chosenRooms: NexoraHotelRoomSummary[] = pool[0]?.rooms ?? [];
-  let bestScore = -1;
-  for (const s of pool) {
-    if (s.score > bestScore) {
-      bestScore = s.score;
-      chosen = s.row;
-      chosenRooms = s.rooms;
+
+  let chosen: Record<string, unknown> = matches[0] as Record<string, unknown>;
+  let chosenRooms: NexoraHotelRoomSummary[] = scoredMatches[0]?.rooms ?? [];
+  let crossPropertyCart = false;
+
+  // Multi-room cart spanning Hostel + Resort: merge rooms from covering matches
+  // (Postman returns both; single-property pick used to drop Suite when prefer=Female Dorm).
+  if (wantedPreferRooms.length > 1) {
+    const allOnOne = scoredMatches.find((s) =>
+      wantedPreferRooms.every((w) => Boolean(matchStayRoom(s.rooms, w))),
+    );
+    if (allOnOne) {
+      chosen = allOnOne.row;
+      chosenRooms = allOnOne.rooms;
+    } else {
+      const merged: NexoraHotelRoomSummary[] = [];
+      const usedRows: Record<string, unknown>[] = [];
+      let covered = true;
+      for (const w of wantedPreferRooms) {
+        const cover = scoredMatches.find((s) => matchStayRoom(s.rooms, w));
+        const room = cover ? matchStayRoom(cover.rooms, w) : undefined;
+        if (!cover || !room) {
+          covered = false;
+          break;
+        }
+        if (!merged.some((r) => r.room_id === room.room_id)) merged.push(room);
+        if (!usedRows.includes(cover.row)) usedRows.push(cover.row);
+      }
+      if (covered && merged.length === wantedPreferRooms.length) {
+        crossPropertyCart = true;
+        chosen = usedRows[0] ?? chosen;
+        chosenRooms = merged;
+      } else {
+        // Fall through to single-room prefer lock on first hint
+        const roomLocked = primaryRoomHint
+          ? scoredMatches.filter((s) =>
+              Boolean(matchStayRoom(s.rooms, primaryRoomHint)),
+            )
+          : [];
+        const pool = roomLocked.length ? roomLocked : scoredMatches;
+        let bestScore = -1;
+        for (const s of pool) {
+          if (s.score > bestScore) {
+            bestScore = s.score;
+            chosen = s.row;
+            chosenRooms = s.rooms;
+          }
+        }
+      }
+    }
+  } else {
+    // Hard lock: if any match has the requested room type, never pick a property without it.
+    const roomLocked = primaryRoomHint
+      ? scoredMatches.filter((s) => s.hasPreferredRoom)
+      : [];
+    const pool = roomLocked.length ? roomLocked : scoredMatches;
+    let bestScore = -1;
+    for (const s of pool) {
+      if (s.score > bestScore) {
+        bestScore = s.score;
+        chosen = s.row;
+        chosenRooms = s.rooms;
+      }
+    }
+    if (bestScore < 0 && pool[0]) {
+      chosen = pool[0].row;
+      chosenRooms = pool[0].rooms;
     }
   }
 
@@ -664,19 +908,48 @@ export function summarizeNexoraHotelFactsPayload(
   }
 
   const hotelName = asString(identity.hotel_name) || 'the property';
-  const propertyType = asString(identity.property_type);
+  const propertyType = (() => {
+    if (!crossPropertyCart) return asString(identity.property_type);
+    const types = scoredMatches
+      .filter((s) =>
+        wantedPreferRooms.some((w) => Boolean(matchStayRoom(s.rooms, w))),
+      )
+      .map((s) => asString((s.row.identity as Record<string, unknown> | undefined)?.property_type))
+      .filter((t): t is string => Boolean(t))
+      .filter((t, i, arr) => arr.findIndex((x) => x.toLowerCase() === t.toLowerCase()) === i);
+    return types.length > 1 ? types.join(' + ') : types[0] ?? asString(identity.property_type);
+  })();
   const city = asString(identity.city);
-  const discountPct = rooms[0]?.discount_pct;
+  const discountPct = rooms.find((r) => r.discount_pct > 0)?.discount_pct ?? rooms[0]?.discount_pct;
+  const browseOnly = rooms.length > 0 && !rooms.some((r) => roomHasLiveRate(r));
   const available = rooms.filter((r) => r.available_beds > 0);
-  const soldOut = rooms.filter((r) => r.available_beds <= 0);
-  const lines = available.slice(0, 4).map((r) => `${r.room_name} ₹${r.price_per_night} (~${r.available_beds})`);
+  const soldOut = rooms.filter((r) => r.available_beds <= 0 && roomHasLiveRate(r));
+  const lines = available.slice(0, 4).map((r) =>
+    roomHasLiveRate(r)
+      ? `${r.room_name} ₹${r.price_per_night} (~${r.available_beds})`
+      : r.room_name,
+  );
   const soldBit = soldOut.length ? ` Sold out: ${soldOut.map((r) => r.room_name).join(', ')}.` : '';
   const discountBit =
-    discountPct != null && discountPct > 0 ? ` ~${discountPct}% off.` : '';
-  const addrBit = address ? ` Address: ${address}.` : '';
+    !browseOnly && discountPct != null && discountPct > 0
+      ? ` Discount ceiling ${discountPct}% is internal — do not speak a discount until they ask, and never open with this ceiling.`
+      : '';
+  const addrBit = address
+    ? ` Address: ${address}.`
+    : ' No address in this result — if they ask where it is, say you will check. Do not guess a landmark, area, or travel time.';
   const policyBit = policyHintBits(policies);
 
   const chosenHotelId = asString(identity.hotel_id);
+  const mergedHotelIds = new Set<string>();
+  if (crossPropertyCart) {
+    for (const s of scoredMatches) {
+      if (!wantedPreferRooms.some((w) => Boolean(matchStayRoom(s.rooms, w)))) continue;
+      const hid = asString(
+        (s.row.identity as Record<string, unknown> | undefined)?.hotel_id,
+      );
+      if (hid) mergedHotelIds.add(hid);
+    }
+  }
   const other_properties = matches
     .filter((m) => m !== chosen)
     .map((m) => {
@@ -687,6 +960,7 @@ export function summarizeNexoraHotelFactsPayload(
       const hid = asString(id.hotel_id);
       // Skip duplicate stubs of the same hotel / empty inventory siblings
       if (chosenHotelId && hid && hid === chosenHotelId) return null;
+      if (hid && mergedHotelIds.has(hid)) return null;
       if (!hid && name.toLowerCase() === hotelName.toLowerCase()) return null;
       const rel = Array.isArray(row.related) ? (row.related as RelatedRow[]) : [];
       if (!collectRoomsFromRelated(rel).length) return null;
@@ -705,12 +979,8 @@ export function summarizeNexoraHotelFactsPayload(
 
   const place = city ? `${city}` : hotelName;
   const typeBit = propertyType ? ` (${propertyType})` : '';
-  const roomBits = available
-    .slice(0, 3)
-    .map((r) => `${r.room_name} ${r.price_per_night}`)
-    .join(', ');
-  const discSpeak =
-    discountPct != null && discountPct > 0 ? ` About ${discountPct} percent off.` : '';
+  const roomNames = available.slice(0, 3).map((r) => r.room_name).join(', ');
+  const nameBits = available.slice(0, 4).map((r) => r.room_name).join(', ');
   const checkSpeak =
     policies.check_in || policies.check_out
       ? ` Check-in ${policies.check_in ?? '—'}, check-out ${policies.check_out ?? '—'}.`
@@ -718,7 +988,9 @@ export function summarizeNexoraHotelFactsPayload(
 
   // When caller already named property/room (prefer), speak that inventory.
   // When multiple properties and no prefer — ask which one; do NOT dump Hostel rates.
-  const preferLocked = Boolean(prefer?.hotel || prefer?.room);
+  const preferLocked = Boolean(
+    prefer?.hotel || prefer?.room || (prefer?.rooms && prefer.rooms.length > 0) || crossPropertyCart,
+  );
   let speak_now: string;
   if (other_properties.length > 0 && !preferLocked) {
     const types = [propertyType, ...other_properties.map((p) => p.property_type)]
@@ -729,8 +1001,14 @@ export function summarizeNexoraHotelFactsPayload(
     speak_now = `${place} mein ${other_properties.length + 1} properties hain — ${typeList}. Kaunsi dekhni hai — phir main uske live rooms bataungi?`;
   } else if (!available.length) {
     speak_now = `${place}${typeBit} pe listed types abhi full dikh rahe hain. Doosri date ya property try karein?`;
+  } else if (browseOnly) {
+    speak_now = `${place}${typeBit} mein rooms: ${nameBits}. Check-in date bataiye — main live options check karti hoon.`;
+  } else if (crossPropertyCart) {
+    speak_now = `${place} (${propertyType ?? 'multi'}): ${roomNames}.${checkSpeak} Ye dono live available hain.`;
   } else {
-    speak_now = `${place}${typeBit}: ${roomBits}.${discSpeak}${checkSpeak} Kaunsa room chahiye?`;
+    // Rates mean this is a follow-up lookup (a date was given). Do not script the
+    // room menu again — the first browse line already listed names.
+    speak_now = `${place}${typeBit}.${checkSpeak} Date note ho gayi. Kaunsa room chahiye?`;
   }
 
   const base = {
@@ -740,7 +1018,7 @@ export function summarizeNexoraHotelFactsPayload(
     city,
     state: asString(identity.state),
     address,
-    discount_pct: discountPct,
+    discount_pct: browseOnly ? undefined : discountPct,
     policies,
     rooms,
     other_properties: other_properties.length ? other_properties : undefined,
@@ -753,6 +1031,14 @@ export function summarizeNexoraHotelFactsPayload(
       ok: true,
       ...base,
       spoken_hint: `${hotelName}${city ? ` (${city})` : ''}: all listed types show 0 free right now.${soldBit}${addrBit}${policyBit} Offer another date/property. Do not invent rooms.`,
+    };
+  }
+
+  if (browseOnly) {
+    return {
+      ok: true,
+      ...base,
+      spoken_hint: `${hotelName}${city ? ` (${city})` : ''} BROWSE (no live rates yet): ${lines.join('; ')}.${addrBit}${extraHotels}${policyBit} Speak room names only — do NOT invent prices/beds. Ask check-in date, then call lookup again with date.`,
     };
   }
 
@@ -769,11 +1055,11 @@ export function compactHotelFactsForLlm(
 ): Record<string, unknown> {
   if (!result.ok) {
     const fallback = result.fallback_to_brain === true;
+    const missingPlace = result.error === MISSING_PLACE_ERROR;
     return {
       ok: false,
       error: result.error,
       fallback_to_brain: fallback,
-      spoken_to_caller: false,
       say: fallback
         ? BRAIN_FALLBACK_HINT
         : (result.say ??
@@ -787,20 +1073,30 @@ export function compactHotelFactsForLlm(
               'Useful answer first — offer retry/callback for live rates, do not only push callback.',
           }
         : {
-            rule:
-              'Live API returned no match for this city. Do NOT invent hotel names. Do NOT claim properties exist from Product Knowledge. Offer another city or callback.',
+            rule: missingPlace
+              ? MISSING_PLACE_HINT
+              : 'Live API returned no match for this city. Do NOT invent hotel names. Do NOT claim properties exist from Product Knowledge. Offer another city or callback.',
           }),
     };
   }
   const multiProperty = Boolean(result.other_properties?.length);
+  const browseOnly =
+    result.rooms.length > 0 && !result.rooms.some((r) => roomHasLiveRate(r));
   const open = result.rooms
     .filter((r) => r.available_beds > 0)
     .slice(0, 4)
-    .map((r) => ({
-      name: r.room_name,
-      price: r.price_per_night,
-      free: r.available_beds,
-    }));
+    .map((r) =>
+      roomHasLiveRate(r)
+        ? {
+            name: r.room_name,
+            price: r.price_per_night,
+            free: r.available_beds,
+          }
+        : {
+            name: r.room_name,
+            ...(r.room_type ? { type: r.room_type } : {}),
+          },
+    );
   const policies: Record<string, string> = {};
   for (const [k, v] of Object.entries(result.policies)) {
     if (typeof v === 'string' && v.trim()) policies[k] = v.length > 220 ? `${v.slice(0, 220)}…` : v;
@@ -815,7 +1111,8 @@ export function compactHotelFactsForLlm(
     hotel: result.hotel_name,
     city: result.city,
     address: result.address,
-    discount_pct: result.discount_pct,
+    discount_pct: browseOnly ? undefined : result.discount_pct,
+    ...(browseOnly ? { browse: true, rates: 'unknown — ask date then re-call lookup' } : {}),
     ...(hideRoomsUntilPropertyPick ? {} : { rooms: open }),
     ...(result.other_properties?.length
       ? {
@@ -827,19 +1124,25 @@ export function compactHotelFactsForLlm(
       : {}),
     ...(Object.keys(policies).length ? { policies } : {}),
     say: result.speak_now || result.spoken_hint,
-    spoken_to_caller: true,
     rule: hideRoomsUntilPropertyPick
       ? 'MULTI-PROPERTY: Ask which property (Hostel vs Resort etc). Do NOT invent Suite/premium room names or prices. Do NOT dump one property\'s dorm rates as the whole city. After they pick, call lookup_hotel_availability again with hotel_name (e.g. Resort) and optional room_name.'
-      : 'Live rates were (or will be) spoken to the caller from "say". Do NOT invent different prices or room types not listed. Do NOT say call later. Do NOT repeat the full list — only clarify or ask which room/property. If they want Resort/Suite/premium and this payload is Hostel-only, re-call lookup with hotel_name + room_name.',
+      : browseOnly
+        ? 'BROWSE: Room names only — no live prices/beds. Speak names from rooms[]. Do NOT invent rates. Ask check-in date, then call lookup_hotel_availability AGAIN with date IMMEDIATELY (no spoken date confirmation before the tool).'
+        : 'SPEAK ONLY WHAT THEY ASKED, ONCE. Location → hotel name and the address field only; if address is missing, say you will check — never guess a landmark, area, minutes, or a WhatsApp location. Rooms → names only, no rupee amounts. If `say` does not list room names, do not read them again. Price, rate, budget, or discount → then use rooms[].price. Do not speak discount_pct until the discount ladder, and never open with that ceiling. Do NOT invent prices or room types. Do NOT say call later. Do NOT re-confirm a check-in date you already repeated. If they want Resort/Suite/premium and this payload is Hostel-only, re-call lookup with hotel_name + room_name.',
   };
 }
 
 async function fetchNexoraHotelFactsOnce(opts: {
   city?: string | string[] | null;
   state?: string | string[] | null;
+  date?: string | null;
+  room_type?: string | string[] | null;
+  price_per_night?: string | number | null;
   limit?: number;
   signal?: AbortSignal;
   prefer?: NexoraMatchPrefer;
+  /** Booking confirm: do not send known.room_type at all. */
+  omitRoomType?: boolean;
 }): Promise<NexoraHotelFactsSummary | NexoraHotelFactsError> {
   const url = envUrl();
   const token = envToken();
@@ -852,12 +1155,24 @@ async function fetchNexoraHotelFactsOnce(opts: {
     };
   }
 
-  const match = buildNexoraHotelMatch({ city: opts.city, state: opts.state });
-  if (!match.city && !match.state) {
+  const stateToken = toNexoraMatchArray(opts.state)?.[0];
+  const roomsFromOpts = parseStayRoomTypeList(opts.room_type);
+  const roomsFromPrefer = parseStayRoomTypeList(opts.prefer?.room);
+  const roomTypes = roomsFromOpts.length ? roomsFromOpts : roomsFromPrefer;
+  const known = buildNexoraHotelKnown({
+    state: stateToken,
+    city: opts.city,
+    date: opts.date,
+    room_type: roomTypes.length ? roomTypes : undefined,
+    price_per_night: opts.price_per_night,
+  });
+  if (opts.omitRoomType) delete (known as { room_type?: string | string[] }).room_type;
+  if (!hasNexoraHotelKnownFilter(known)) {
     return {
       ok: false,
-      error: 'city or state is required',
-      hint: 'Ask which city / state / property they mean.',
+      error: MISSING_PLACE_ERROR,
+      hint: MISSING_PLACE_HINT,
+      say: MISSING_PLACE_SAY,
     };
   }
 
@@ -873,11 +1188,11 @@ async function fetchNexoraHotelFactsOnce(opts: {
       },
       body: JSON.stringify({
         v: 1,
-        // Live Nexora index is Room-centric; Hotel still works with some tokens but Room matches the public API.
-        entity_type: 'Room',
-        match,
-        select: [...NEXORA_HOTEL_SELECT_FIELDS],
-        include: { operator_context: false, related: true },
+        // Progressive Hotel index: only send fields the caller has named so far.
+        entity_type: 'Hotel',
+        known,
+        select: [],
+        include: { operator_context: true, related: true },
         limit,
       }),
       signal: opts.signal,
@@ -926,7 +1241,8 @@ async function fetchNexoraHotelFactsOnce(opts: {
 
 /**
  * @param hotelOrCity — city ("Jaipur") or branded name; empty allowed when opts.state is set (state-only).
- * State is sent ONLY when opts.state is explicitly provided — never auto-inferred into match.
+ * State is sent ONLY when opts.state is explicitly provided — never auto-inferred into known.
+ * Progressive: pass only filters the caller has named (city/state/date/room_type/price).
  */
 export async function queryNexoraHotelFacts(
   hotelOrCity: string,
@@ -934,6 +1250,9 @@ export async function queryNexoraHotelFacts(
     limit?: number;
     signal?: AbortSignal;
     state?: string;
+    date?: string;
+    room_type?: string | string[];
+    price_per_night?: string | number;
     prefer?: NexoraMatchPrefer;
   },
 ): Promise<NexoraHotelFactsSummary | NexoraHotelFactsError> {
@@ -942,8 +1261,9 @@ export async function queryNexoraHotelFacts(
   if (!name && !explicitState) {
     return {
       ok: false,
-      error: 'city or state is required',
-      hint: 'Ask which city / state / property they mean.',
+      error: MISSING_PLACE_ERROR,
+      hint: MISSING_PLACE_HINT,
+      say: MISSING_PLACE_SAY,
     };
   }
 
@@ -953,12 +1273,24 @@ export async function queryNexoraHotelFacts(
   });
   const primary = resolved.city || name;
   const primarySignal = opts?.signal ?? AbortSignal.timeout(1_800);
+  const roomTypes =
+    parseStayRoomTypeList(opts?.room_type).length > 0
+      ? parseStayRoomTypeList(opts?.room_type)
+      : parseStayRoomTypeList(opts?.prefer?.room);
+  const knownExtras = {
+    ...(opts?.date?.trim() ? { date: opts.date.trim() } : {}),
+    ...(roomTypes.length ? { room_type: roomTypes } : {}),
+    ...(opts?.price_per_night != null && String(opts.price_per_night).trim()
+      ? { price_per_night: opts.price_per_night }
+      : {}),
+  };
   const primaryResult = await fetchNexoraHotelFactsOnce({
     city: primary || undefined,
     state: resolved.state,
     signal: primarySignal,
     limit: opts?.limit ?? 40,
     prefer: opts?.prefer,
+    ...knownExtras,
   });
   if (primaryResult.ok) {
     if (
@@ -989,6 +1321,7 @@ export async function queryNexoraHotelFacts(
     signal: opts?.signal ?? AbortSignal.timeout(1_800),
     limit: opts?.limit ?? 40,
     prefer: opts?.prefer,
+    ...knownExtras,
   };
 
   // Race candidates — return the first successful match (phone latency).
@@ -1059,8 +1392,28 @@ export type StayInventoryGateResult =
       alternatives?: { name: string; free: number; price: number }[];
     };
 
+const STAY_ROOM_NUMBER_WORDS: Record<string, string> = {
+  one: '1',
+  two: '2',
+  three: '3',
+  four: '4',
+  five: '5',
+  six: '6',
+  seven: '7',
+  eight: '8',
+  nine: '9',
+  ten: '10',
+};
+
 function normalizeStayRoomKey(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => STAY_ROOM_NUMBER_WORDS[word] ?? word)
+    .join(' ');
 }
 
 /** Match a spoken/typed room against live inventory rows. */
@@ -1119,6 +1472,34 @@ export function resolveStayInventoryQuery(opts: {
   return '';
 }
 
+/**
+ * Cities for a booking confirm. Scans city, hotel name, and notes so
+ * Mussoorie + Rishikesh become ["Mussoorie","Rishikesh"], not the first only.
+ */
+export function stayInventoryCities(opts: {
+  city?: string;
+  hotel_name?: string;
+  notes?: string;
+}): string[] {
+  const out: string[] = [];
+  const push = (city: string) => {
+    const t = city.trim();
+    if (!t) return;
+    if (!out.some((x) => x.toLowerCase() === t.toLowerCase())) out.push(t);
+  };
+  for (const blob of [opts.city, opts.hotel_name, opts.notes]) {
+    for (const city of extractKnownHotelCitiesFromText(blob ?? '')) push(city);
+  }
+  if (out.length) return out;
+  const fallback = resolveStayInventoryQuery(opts);
+  if (!fallback) return [];
+  for (const part of fallback.split(/\s*(?:,|\/|;|\+|\band\b|\baur\b)\s*/i)) {
+    const canon = canonicalizeHotelCityForApi(part) || part.trim();
+    push(canon);
+  }
+  return out;
+}
+
 function openRoomsPayload(rooms: NexoraHotelRoomSummary[]) {
   return rooms
     .filter((r) => r.available_beds > 0)
@@ -1133,7 +1514,7 @@ function openRoomsPayload(rooms: NexoraHotelRoomSummary[]) {
 /** Pure gate over an already-fetched facts payload (unit-testable). */
 export function evaluateStayInventoryForBooking(
   result: NexoraHotelFactsSummary | NexoraHotelFactsError,
-  opts?: { room_name?: string },
+  opts?: { room_name?: string | string[] },
 ): StayInventoryGateResult {
   if (!result.ok) {
     if (result.fallback_to_brain) {
@@ -1149,50 +1530,85 @@ export function evaluateStayInventoryForBooking(
     };
   }
 
-  const alternatives = openRoomsPayload(result.rooms);
-  const roomWanted = opts?.room_name?.trim();
+  const alternatives = openRoomsPayload(result.rooms).filter((a) => a.price > 0);
+  const wantedRooms = parseStayRoomTypeList(opts?.room_name);
+  const browseOnly =
+    result.rooms.length > 0 && !result.rooms.some((r) => roomHasLiveRate(r));
 
-  if (roomWanted) {
-    const match = matchStayRoom(result.rooms, roomWanted);
-    if (!match) {
-      return {
-        ok: false,
-        error: `Room "${roomWanted}" not found in live inventory`,
-        inventory_stale: true,
-        city: result.city,
-        hotel_name: result.hotel_name,
-        alternatives,
-        hint: alternatives.length
-          ? `Do NOT confirm booking. That room type is not listed live at ${result.hotel_name}${result.property_type ? ` (${result.property_type})` : ''}. Offer only: ${alternatives
-              .map((a) => `${a.name} (~${a.free}, ₹${a.price})`)
-              .join('; ')}. If they wanted Resort/Suite/premium, retry lookup_hotel_availability + capture_demo_lead with hotel_name (e.g. Resort) and the exact listed room_name — never invent Suite.`
-          : `Do NOT confirm booking. No free rooms at ${result.hotel_name} right now. Offer another date/property.`,
-      };
+  if (browseOnly) {
+    return {
+      ok: false,
+      error: 'Live rates not available yet (browse-only inventory)',
+      inventory_stale: true,
+      city: result.city,
+      hotel_name: result.hotel_name,
+      alternatives: [],
+      hint:
+        'Do NOT confirm booking. Live prices/beds are missing — ask check-in date, call lookup_hotel_availability with date, then retry capture_demo_lead. Speak room names only; never invent rates.',
+    };
+  }
+
+  if (wantedRooms.length > 0) {
+    const matched: NexoraHotelRoomSummary[] = [];
+    for (const roomWanted of wantedRooms) {
+      const match = matchStayRoom(result.rooms, roomWanted);
+      if (!match) {
+        return {
+          ok: false,
+          error: `Room "${roomWanted}" not found in live inventory`,
+          inventory_stale: true,
+          city: result.city,
+          hotel_name: result.hotel_name,
+          alternatives,
+          hint: alternatives.length
+            ? `Do NOT confirm booking. That room type is not listed live at ${result.hotel_name}${result.property_type ? ` (${result.property_type})` : ''}. Offer only: ${alternatives
+                .map((a) => `${a.name} (~${a.free}, ₹${a.price})`)
+                .join('; ')}. If they wanted Resort/Suite/premium, retry lookup_hotel_availability + capture_demo_lead with hotel_name (e.g. Resort) and the exact listed room_name — never invent Suite.`
+            : `Do NOT confirm booking. No free rooms at ${result.hotel_name} right now. Offer another date/property.`,
+        };
+      }
+      if (match.available_beds <= 0) {
+        return {
+          ok: false,
+          error: `Room "${match.room_name}" just sold out`,
+          inventory_stale: true,
+          city: result.city,
+          hotel_name: result.hotel_name,
+          alternatives,
+          hint: alternatives.length
+            ? `Do NOT confirm booking. ${match.room_name} is full now. Offer: ${alternatives
+                .map((a) => `${a.name} (~${a.free}, ₹${a.price})`)
+                .join('; ')}. Get a new choice, then retry capture_demo_lead.`
+            : `Do NOT confirm booking. ${match.room_name} and other listed types are full. Offer another date/property.`,
+        };
+      }
+      if (!roomHasLiveRate(match)) {
+        return {
+          ok: false,
+          error: `Room "${match.room_name}" has no live rate yet`,
+          inventory_stale: true,
+          city: result.city,
+          hotel_name: result.hotel_name,
+          alternatives,
+          hint:
+            'Do NOT confirm booking. Ask check-in date, re-call lookup_hotel_availability with date for live price, then retry capture_demo_lead.',
+        };
+      }
+      matched.push(match);
     }
-    if (match.available_beds <= 0) {
-      return {
-        ok: false,
-        error: `Room "${match.room_name}" just sold out`,
-        inventory_stale: true,
-        city: result.city,
-        hotel_name: result.hotel_name,
-        alternatives,
-        hint: alternatives.length
-          ? `Do NOT confirm booking. ${match.room_name} is full now. Offer: ${alternatives
-              .map((a) => `${a.name} (~${a.free}, ₹${a.price})`)
-              .join('; ')}. Get a new choice, then retry capture_demo_lead.`
-          : `Do NOT confirm booking. ${match.room_name} and other listed types are full. Offer another date/property.`,
-      };
-    }
+    const primary = matched[0]!;
     return {
       ok: true,
       inventory_verified: true,
       city: result.city,
       hotel_name: result.hotel_name,
       room: {
-        name: match.room_name,
-        free: match.available_beds,
-        price: match.price_per_night,
+        name:
+          matched.length === 1
+            ? primary.room_name
+            : matched.map((m) => m.room_name).join(', '),
+        free: Math.min(...matched.map((m) => m.available_beds)),
+        price: matched.reduce((sum, m) => sum + m.price_per_night, 0),
       },
     };
   }
@@ -1222,10 +1638,25 @@ export function evaluateStayInventoryForBooking(
  * Blocks save when live inventory shows sold-out / missing room.
  * Soft-allows when the live API is down (fallback_to_brain) so we never invent sold-out.
  */
+/** Pull YYYY-MM-DD from preferred_time / booking slot text for live inventory. */
+export function stayInventoryDateFromPreferredTime(
+  preferred?: string | null,
+): string | undefined {
+  const t = preferred?.trim();
+  if (!t) return undefined;
+  const iso = t.match(/\b(20\d{2}-\d{2}-\d{2})\b/);
+  return iso?.[1];
+}
+
 export async function assertLiveStayInventoryForBooking(opts: {
   city?: string;
   hotel_name?: string;
-  room_name?: string;
+  room_name?: string | string[];
+  room_type?: string | string[];
+  /** Explicit stay date (YYYY-MM-DD). Prefer this when known. */
+  date?: string;
+  /** Booking slot from capture_demo_lead — used when `date` is omitted. */
+  preferred_time?: string;
   notes?: string;
   signal?: AbortSignal;
 }): Promise<StayInventoryGateResult> {
@@ -1233,8 +1664,8 @@ export async function assertLiveStayInventoryForBooking(opts: {
     return { ok: true, inventory_verified: false };
   }
 
-  const query = resolveStayInventoryQuery(opts);
-  if (!query) {
+  const cities = stayInventoryCities(opts);
+  if (!cities.length) {
     return {
       ok: false,
       error: 'city is required before booking',
@@ -1244,12 +1675,30 @@ export async function assertLiveStayInventoryForBooking(opts: {
     };
   }
 
-  const result = await queryNexoraHotelFacts(query, {
+  const roomTypes = (() => {
+    const fromType = parseStayRoomTypeList(opts.room_type);
+    if (fromType.length) return fromType;
+    return parseStayRoomTypeList(opts.room_name);
+  })();
+  const date =
+    opts.date?.trim() ||
+    stayInventoryDateFromPreferredTime(opts.preferred_time) ||
+    undefined;
+  // Confirm with city + date only. Room names are matched on the response,
+  // never sent as known.room_type. prefer.rooms is local merge, not the HTTP body.
+  const result = await fetchNexoraHotelFactsOnce({
+    city: cities,
     signal: opts.signal ?? AbortSignal.timeout(2_500),
-    prefer: {
-      ...(opts.hotel_name?.trim() ? { hotel: opts.hotel_name.trim() } : {}),
-      ...(opts.room_name?.trim() ? { room: opts.room_name.trim() } : {}),
-    },
+    omitRoomType: true,
+    ...(date ? { date } : {}),
+    prefer:
+      roomTypes.length > 1
+        ? { rooms: roomTypes }
+        : cities.length === 1 && opts.hotel_name?.trim()
+          ? { hotel: opts.hotel_name.trim() }
+          : undefined,
   });
-  return evaluateStayInventoryForBooking(result, { room_name: opts.room_name });
+  return evaluateStayInventoryForBooking(result, {
+    room_name: roomTypes.length ? roomTypes : undefined,
+  });
 }

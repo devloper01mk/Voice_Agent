@@ -1,6 +1,7 @@
 import type { Server } from 'node:http';
 import { URL } from 'node:url';
 import { WebSocketServer, type WebSocket } from 'ws';
+import { configuredApiAuthToken, isApiAuthEnabled, tokenMatches } from '../auth.js';
 import { TelephonyCallSession } from './call-session.js';
 import { emitTelephonyEvent } from './event-bus.js';
 import { resolveCallIdForStart } from './resolve-call.js';
@@ -22,13 +23,31 @@ function logStartSummary(msg: Record<string, unknown>): Record<string, unknown> 
   };
 }
 
+function extractUpgradeToken(url: URL, reqHeaders: Record<string, string | string[] | undefined>): string | null {
+  const q = url.searchParams.get('token')?.trim();
+  if (q) return q;
+  const auth = reqHeaders.authorization;
+  if (typeof auth === 'string' && auth.toLowerCase().startsWith('bearer ')) {
+    return auth.slice(7).trim() || null;
+  }
+  const apiKey = reqHeaders['x-api-key'];
+  if (typeof apiKey === 'string' && apiKey.trim()) return apiKey.trim();
+  return null;
+}
+
 export function attachTelephonyWebSocket(server: Server, path = '/stream'): void {
   const wss = new WebSocketServer({ noServer: true });
 
   server.on('upgrade', (req, socket, head) => {
     const host = req.headers.host ?? 'localhost';
-    const pathname = new URL(req.url ?? '/', `http://${host}`).pathname;
-    if (pathname !== path) {
+    const url = new URL(req.url ?? '/', `http://${host}`);
+    if (url.pathname !== path) {
+      socket.destroy();
+      return;
+    }
+
+    if (isApiAuthEnabled() && !tokenMatches(extractUpgradeToken(url, req.headers as Record<string, string | string[] | undefined>))) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
       socket.destroy();
       return;
     }
@@ -147,5 +166,7 @@ export function publicWssUrl(callId: string): string {
   }
   const url = new URL(base);
   url.searchParams.set('callId', callId);
+  const token = configuredApiAuthToken();
+  if (token) url.searchParams.set('token', token);
   return url.toString();
 }

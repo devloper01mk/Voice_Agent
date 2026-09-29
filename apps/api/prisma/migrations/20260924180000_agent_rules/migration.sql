@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "Agent" ADD COLUMN "agentRules" TEXT NOT NULL DEFAULT '';
+ALTER TABLE "Agent" ALTER COLUMN "productName" SET DEFAULT '';

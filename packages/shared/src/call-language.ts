@@ -8,7 +8,7 @@ export type CallLanguageLock = 'en' | 'hinglish';
 export type CallSpeechLanguage = 'en' | 'hinglish';
 
 const EXPLICIT_ENGLISH =
-  /\b((can|could|shall|may)\s+we\s+(talk|speak|continue)\s+in\s+english|talk\s+in\s+english|speak\s+(in\s+)?english|english\s+(mein|me)\s+(baat|bolo|bol)|in\s+english\s+(please|pls)?|switch\s+to\s+english|english\s+please)\b|इंग्लिश|english\s*में/i;
+  /\b((can|could|shall|may)\s+we\s+(talk|speak|continue)\s+in\s+english|talk\s+in\s+english|speak\s+(in\s+)?english|speaking\s+english|english\s+(mein|me)\s+(baat|bolo|bol)|in\s+english\s+(please|pls)?|switch\s+to\s+english|english\s+please|only\s+english|don'?t\s+know\s+hindi|do\s+not\s+know\s+hindi|no\s+hindi)\b|इंग्लिश|english\s*में/i;
 
 const EXPLICIT_HINGLISH_OR_HINDI =
   /\b((can|could|shall|may)\s+we\s+(talk|speak|continue)\s+in\s+(hindi|hinglish)|talk\s+in\s+(hindi|hinglish)|speak\s+(in\s+)?(hindi|hinglish)|hindi\s+(mein|me)\s+(baat|bolo|bol|batao|bataiye)|hinglish\s+(mein|me)\s+(baat|bolo|bol|batao|bataiye)|switch\s+to\s+(hindi|hinglish)|hindi\s+please|hinglish\s+please|english\s+mein\s+kyun|english\s+me\s+kyun)\b|हिंदी|हिन्दी|हिंदी\s*में|इंग्लिश\s*में\s*क्यों/i;
@@ -27,19 +27,19 @@ const NUMBERS_TIME_RULE_EN =
   'Times, prices, weight/height/age, and natural quantities in English only ("two o\'clock", "2 PM", "one thirty PM", "ten", "ten lakh", "nine hundred fifty", "forty-five") — never Hindi/Hinglish quantity or clock words: forbidden "das", "do baje", "das baje", "das lakh", "teen baje", "ek baje". ' +
   'Use English: ten / ten lakh / two o\'clock / 2 PM / forty-five — never say "das" for 10; never digit-spell weight (no "four five" for 45). ' +
   'Never write clock times with a colon when speaking (no "1:00 PM", never say "colon") — use "1 PM" / "one thirty PM" / "twelve PM". ' +
-  'Phone, OTP, and PIN ONLY as English digit words one-by-one or in pairs (zero–nine) — never "nine hundred"/"nau sau" for those fields. ' +
+  'Phone, OTP, and PIN ONLY as English digit words one-by-one or in pairs (zero–nine) — never "nine hundred"/"nau sau", and never "double"/"triple" (say "two two", not "double two"). ' +
   'When the caller speaks numbers: treat price/amount/weight/height/age as natural English; treat phone/OTP/PIN as digit sequences.';
 
 const NUMBERS_TIME_RULE_HI =
   'Times, prices, weight/height/age, and natural quantities in polished Roman Hinglish ("do baje", "das baje", "derh baje", "das lakh", "nau sau pachas", "paintalis"). ' +
   'Never write clock times with a colon when speaking (no "1:00 PM", never say "colon") — use "ek baje" / "derh baje" / "barah baje". Never digit-spell weight (45 → "paintalis" / "forty-five", not "four five"). ' +
-  'Phone, OTP, and PIN ONLY as English digit words (one, two, three… nine, zero) — never Hindi digit names and never natural Hindi amounts like "nau sau" for those fields. ' +
+  'Phone, OTP, and PIN ONLY as English digit words (one, two, three… nine, zero) — never Hindi digit names, never "nau sau", and never "double"/"triple" (say "two two", not "double two"). ' +
   'When the caller speaks numbers: treat price/amount/weight/height/age as natural Hindi/Hinglish; treat phone/OTP/PIN as digit sequences (English or Hindi digit words both map to digits).';
 function normalizeTurn(text: string): string {
   return text.normalize('NFC').trim().replace(/\s+/g, ' ');
 }
 
-/** Map Azure / Cartesia-style locale strings to speech language. */
+/** Map Azure / locale-style locale strings to speech language. */
 export function speechLanguageFromSttLocale(
   locale: string | null | undefined,
 ): CallSpeechLanguage | null {
@@ -112,6 +112,8 @@ export function updateCallLanguageLock(
 ): CallLanguageLock | null {
   if (isExplicitEnglishRequest(text)) return 'en';
   if (isExplicitHinglishOrHindiRequest(text)) return 'hinglish';
+  // Hindi script on a call that is not English-locked stays Hindi for the rest of the call.
+  if (current !== 'en' && /[\u0900-\u097F]/.test(text)) return 'hinglish';
   return current;
 }
 
@@ -187,7 +189,7 @@ export function effectiveSpeechLanguage(
   return lock ?? soft;
 }
 
-/** TTS Cartesia locale for a speech language / lock. */
+/** TTS locale for a speech language / lock. */
 export function ttsLocaleForLock(lock: CallLanguageLock | CallSpeechLanguage | null): 'en' | 'hi' | null {
   if (lock === 'en') return 'en';
   if (lock === 'hinglish') return 'hi';

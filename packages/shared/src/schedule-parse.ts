@@ -3,7 +3,12 @@
  * Used when saving leads/callbacks so the month calendar and Google sync work.
  */
 
-import { addIstCalendarDays, getIstCalendarParts, getIstNowParts } from './call-time.js';
+import {
+  addIstCalendarDays,
+  getIstCalendarParts,
+  getIstNowParts,
+  resolveIstWeekdayInWeek,
+} from './call-time.js';
 
 export type BookingType =
   | 'demo'
@@ -156,6 +161,57 @@ function parseClockHourMinute(text: string): { hour: number; minute: number; fou
   return { hour: 11, minute: 0, found: false };
 }
 
+const WEEKDAY_NAME_TO_INDEX: Record<string, number> = {
+  sunday: 0,
+  monday: 1,
+  tuesday: 2,
+  wednesday: 3,
+  thursday: 4,
+  friday: 5,
+  saturday: 6,
+  ravivar: 0,
+  somvaar: 1,
+  somvar: 1,
+  mangalvaar: 2,
+  mangalvar: 2,
+  budhvaar: 3,
+  budhvar: 3,
+  guruvaar: 4,
+  guruvar: 4,
+  shukrvaar: 5,
+  shukrvar: 5,
+  shanivaar: 6,
+  shanivar: 6,
+};
+
+/** Detect next-to-next (2) or next week (1). Check next-to-next first. */
+function detectRelativeWeekOffset(text: string): number | null {
+  const t = text.toLowerCase().normalize('NFC');
+  if (
+    /\bnext[\s-]+to[\s-]+next(\s+week)?\b/i.test(t) ||
+    /\b(agle|agli)\s+(agle|agli)\s+(hafte|hafta|week)\b/i.test(t) ||
+    /\bweek\s+after\s+next\b/i.test(t)
+  ) {
+    return 2;
+  }
+  if (
+    /\bnext\s+week\b/i.test(t) ||
+    /\b(agle|agli)\s+(hafte|hafta|week)\b/i.test(t) ||
+    /\bcoming\s+week\b/i.test(t)
+  ) {
+    return 1;
+  }
+  return null;
+}
+
+function findWeekdayIndexInText(text: string): number | null {
+  const t = text.toLowerCase().normalize('NFC');
+  for (const [name, idx] of Object.entries(WEEKDAY_NAME_TO_INDEX)) {
+    if (new RegExp(`\\b${name}\\b`, 'i').test(t)) return idx;
+  }
+  return null;
+}
+
 function resolveRelativeDay(
   text: string,
   now: Date,
@@ -210,30 +266,22 @@ function resolveRelativeDay(
     return { year, month, day, found: true };
   }
 
-  // Weekday → next occurrence
-  const weekdays: Record<string, number> = {
-    sunday: 0,
-    monday: 1,
-    tuesday: 2,
-    wednesday: 3,
-    thursday: 4,
-    friday: 5,
-    saturday: 6,
-    ravivar: 0,
-    somvaar: 1,
-    somvar: 1,
-    mangalvaar: 2,
-    mangalvar: 2,
-    budhvaar: 3,
-    budhvar: 3,
-    guruvaar: 4,
-    guruvar: 4,
-    shukrvaar: 5,
-    shukrvar: 5,
-    shanivaar: 6,
-    shanivar: 6,
-  };
-  for (const [name, idx] of Object.entries(weekdays)) {
+  // next week / next to next week (+ weekday) — Monday-start Indian weeks
+  const weekOffset = detectRelativeWeekOffset(t);
+  if (weekOffset !== null) {
+    const weekdayIdx = findWeekdayIndexInText(t);
+    // Default to Monday of that week when no weekday is named
+    const target = resolveIstWeekdayInWeek(now, weekOffset, weekdayIdx ?? 1);
+    return {
+      year: target.year,
+      month: target.month,
+      day: target.day,
+      found: true,
+    };
+  }
+
+  // Weekday alone → next occurrence
+  for (const [name, idx] of Object.entries(WEEKDAY_NAME_TO_INDEX)) {
     if (new RegExp(`\\b${name}\\b`, 'i').test(t)) {
       let delta = (idx - cal.weekdayIndex + 7) % 7;
       if (delta === 0) delta = 7; // next week if same day without "aaj"

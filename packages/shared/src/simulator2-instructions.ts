@@ -25,7 +25,7 @@ import {
   SIMULATOR2_PRODUCT_KNOWLEDGE_CHARS,
 } from './simulator2-compact-prompt.js';
 
-/** Simulator 2.0 cascaded default — lightly happy / expressive Cartesia delivery. */
+/** Simulator 2.0 legacy emotion field (unused with Gemini Live). */
 export const SIMULATOR2_DEFAULT_TTS_EMOTION = 'happy';
 
 /** Fallback when Agent Studio has no llmModel saved. */
@@ -35,25 +35,15 @@ export function resolveSimulator2LlmModel(): string {
   return process.env.OPENAI_SIMULATOR2_MODEL?.trim() || SIMULATOR2_DEFAULT_LLM_MODEL;
 }
 
-export type CallLlmProvider = 'gpt' | 'groq';
+export type CallLlmProvider = 'gpt';
 
-/** Live phone + Simulator 2.0 use the Agent Studio LLM. */
+/** Live phone + Simulator 2.0 use the Agent Studio LLM (GPT only). */
 export function resolveCallLlm(agent?: {
   llmProvider?: string | null;
   llmModel?: string | null;
 }): { provider: CallLlmProvider; model: string } {
-  const provider: CallLlmProvider = agent?.llmProvider === 'groq' ? 'groq' : 'gpt';
   const model = agent?.llmModel?.trim();
-  if (model) return { provider, model };
-  if (provider === 'groq') {
-    return {
-      provider,
-      model:
-        process.env.GROQ_MODEL?.trim() ||
-        process.env.GROQ_FALLBACK_MODEL?.trim() ||
-        'llama-3.3-70b-versatile',
-    };
-  }
+  if (model) return { provider: 'gpt', model };
   return { provider: 'gpt', model: resolveSimulator2LlmModel() };
 }
 

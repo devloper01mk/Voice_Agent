@@ -1,11 +1,12 @@
-import { prisma } from '../db.js';
 import {
-  countRecentPendingCalls,
+  countRecentPendingCallsMatchingTail,
   findRecentPendingCall,
   getPendingCall,
   normalizeCallId,
+  purgeExpiredPendingCalls,
   resolveCallId,
 } from './call-registry.js';
+import { prisma } from '../db.js';
 
 function digitsOnly(raw: string): string {
   return raw.replace(/\D/g, '');
@@ -35,10 +36,16 @@ async function findCallByIdOrNormalized(callId: string) {
   return recent.find((c) => normalizeCallId(c.id) === normalized) ?? null;
 }
 
-/** Resolve our Call.id from Smartflo's WebSocket start payload. */
+/**
+ * Resolve our Call.id from Smartflo's WebSocket start payload.
+ * Prefers explicit callId / externalCallId. Phone-tail is only used when exactly
+ * one recent Acefone candidate matches (no sole-pending fallback).
+ */
 export async function resolveCallIdForStart(
   msg: Record<string, unknown>,
 ): Promise<string | undefined> {
+  purgeExpiredPendingCalls();
+
   const start = msg.start as Record<string, unknown> | undefined;
   const merged = {
     ...msg,
@@ -78,13 +85,16 @@ export async function resolveCallIdForStart(
   const toDigits = digitsOnly(String(start?.to ?? msg.to ?? ''));
   const toTail = phoneTail(toDigits);
   if (toTail) {
-    const pending = findRecentPendingCall({ toNumber: toTail });
-    if (pending) {
-      console.log('[telephony] resolve start → pending phone', pending.callId);
-      return pending.callId;
+    if (countRecentPendingCallsMatchingTail(toTail) === 1) {
+      const pending = findRecentPendingCall({ toNumber: toTail });
+      if (pending) {
+        console.log('[telephony] resolve start → pending phone', pending.callId);
+        return pending.callId;
+      }
+    } else if (countRecentPendingCallsMatchingTail(toTail) > 1) {
+      console.warn('[telephony] resolve start → ambiguous pending phone', { toTail });
     }
 
-    // Prefer Acefone click-to-call rows — never bind media to a stuck LiveKit SIP call.
     const candidates = await prisma.call.findMany({
       where: {
         provider: 'acefone',
@@ -94,20 +104,20 @@ export async function resolveCallIdForStart(
       orderBy: { startedAt: 'desc' },
       take: 30,
     });
-    const match = candidates.find((c) => {
+    const matches = candidates.filter((c) => {
       const tail = phoneTail(c.toNumber ?? c.contactPhone ?? '');
       return tail === toTail;
     });
-    if (match) {
-      console.log('[telephony] resolve start → acefone phone', match.id, { toTail });
-      return match.id;
+    if (matches.length === 1) {
+      console.log('[telephony] resolve start → acefone phone', matches[0]!.id, { toTail });
+      return matches[0]!.id;
     }
-  }
-
-  if (countRecentPendingCalls() === 1) {
-    const only = findRecentPendingCall()?.callId;
-    if (only) console.log('[telephony] resolve start → sole pending', only);
-    return only;
+    if (matches.length > 1) {
+      console.warn('[telephony] resolve start → ambiguous acefone phone', {
+        toTail,
+        count: matches.length,
+      });
+    }
   }
 
   console.warn('[telephony] resolve start → unresolved', {

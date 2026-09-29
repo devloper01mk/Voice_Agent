@@ -6,7 +6,8 @@ services:
       POSTGRES_PASSWORD: vsa
       POSTGRES_DB: voice_sales_agent
     ports:
-      - "5432:5432"
+      # 5433 avoids clash with Enterprise/Homebrew Postgres on host :5432
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
 

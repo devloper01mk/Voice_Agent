@@ -574,7 +574,7 @@ export default function LeadsPage() {
           {!loading && calls.length === 0 && (
             <div className="lc-empty">
               <strong>No calls yet</strong>
-              <p>Run the Call Simulator to create inbound or outbound sessions.</p>
+              <p>Run the Simulator to create inbound or outbound sessions.</p>
             </div>
           )}
 

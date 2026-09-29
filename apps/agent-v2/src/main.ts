@@ -9,26 +9,21 @@ import {
 } from '@livekit/rtc-node';
 import {
   buildOutboundOpenerInstructions,
-  isGeminiLivePipeline,
-  isS2sPipeline,
   normalizeRealtimeS2sUserConfig,
-  normalizeSttProvider,
-  parseVoiceLanguages,
   realtimeS2sUserConfigToSessionConfig,
 } from '@vsa/shared';
 import { fileURLToPath } from 'node:url';
-import { startAmbientAudio } from './ambient-audio.js';
-import { probeAzureSpeechKey } from './azure-stt.js';
-import { attachCallTelemetry, publishCallError, publishSessionConfig } from './call-telemetry.js';
+import { attachCallTelemetry, publishSessionConfig } from './call-telemetry.js';
 import { attachCallTranscriptPersist } from './call-transcript.js';
+import { attachRepeatSpeechGuard } from './repeat-speech-guard.js';
+import { attachResponseWatchdog } from './response-watchdog.js';
+import { attachSessionGuards } from './session-guards.js';
 import { attachSilenceWatchdog } from './silence-watchdog.js';
-import { createCallVad } from './call-vad.js';
 import { getLatencyConfig } from './latency-profile.js';
 import { resolveAgentFromRoom } from './load-agent.js';
-import { createStt } from './stt-factory.js';
-import { probeSarvamApiKey } from './sarvam-stt.js';
 import { resolveNoiseCancellation } from './noise-cancellation.js';
 import { createVoiceAgent } from './voice-agent.js';
+import { apiFetch } from './api-fetch.js';
 
 type SipAnswerResult = {
   answered: boolean;
@@ -38,8 +33,7 @@ type SipAnswerResult = {
 };
 
 async function patchCallStatus(callId: string, status: string): Promise<void> {
-  const apiUrl = (process.env.API_URL ?? 'http://localhost:3001').replace(/\/$/, '');
-  const res = await fetch(`${apiUrl}/api/calls/${callId}`, {
+  const res = await apiFetch(`/api/calls/${callId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ status }),
@@ -255,6 +249,163 @@ async function waitForSipAnswered(
   });
 }
 
+type LoadedCall = Awaited<ReturnType<typeof resolveAgentFromRoom>>;
+
+type LiveCall = {
+  session: voice.AgentSession;
+  room: Room;
+  resolved: LoadedCall;
+  bookingLock: ReturnType<typeof createVoiceAgent>['bookingLock'];
+  agentGender: ReturnType<typeof createVoiceAgent>['agentGender'];
+};
+
+/** Connect Gemini. When holdUntilAnswer, mic and speaker stay off until pickup. */
+async function beginVoiceSession(opts: {
+  room: Room;
+  roomName: string;
+  telephony: boolean;
+  resolved: LoadedCall;
+  holdUntilAnswer: boolean;
+}): Promise<LiveCall> {
+  const { room, roomName, telephony, resolved, holdUntilAnswer } = opts;
+  const { agent, callId, direction, prospectName, contactPhone, contactEmail } = resolved;
+
+  console.info(
+    'AGENT_SESSION_STARTING',
+    JSON.stringify({
+      roomName,
+      callId: callId ?? null,
+      telephony,
+      holdUntilAnswer,
+      voicePipeline: agent.voicePipeline ?? null,
+    }),
+  );
+
+  const latency = getLatencyConfig({ telephony });
+  const session = new voice.AgentSession({
+    turnHandling: {
+      turnDetection: 'realtime_llm',
+      interruption: {
+        minDuration: latency.interruption.minDuration,
+        minWords: latency.interruption.minWords,
+        resumeFalseInterruption: latency.interruption.resumeFalseInterruption,
+        falseInterruptionTimeout: latency.interruption.falseInterruptionTimeout,
+      },
+    },
+    aecWarmupDuration: telephony ? latency.aecWarmupDuration : undefined,
+    ttsReadIdleTimeout: 20_000,
+    // LiveKit's 15s "user away" nudge made the agent speak again with nobody talking.
+    userAwayTimeout: telephony ? null : undefined,
+  });
+
+  const { agent: voiceAgent, bookingLock, agentGender } = createVoiceAgent(
+    agent,
+    callId,
+    direction,
+    prospectName,
+    contactPhone,
+    contactEmail,
+    room,
+    { telephony },
+  );
+
+  await session.start({
+    agent: voiceAgent,
+    room,
+    inputOptions: {
+      audioSampleRate: 16000,
+      audioNumChannels: 1,
+      noiseCancellation: resolveNoiseCancellation({ telephony }),
+      deleteRoomOnClose: !holdUntilAnswer,
+    },
+  });
+
+  if (holdUntilAnswer) {
+    session.input.setAudioEnabled(false);
+    session.output.setAudioEnabled(false);
+    console.info('[vsa] Gemini preconnected during ring — audio held until answer');
+  }
+
+  console.info(
+    'AGENT_SESSION_STARTED',
+    JSON.stringify({
+      roomName,
+      callId: callId ?? null,
+      telephony,
+      held: holdUntilAnswer,
+    }),
+  );
+
+  const s2sConfig =
+    agent.realtimeS2sConfig ??
+    normalizeRealtimeS2sUserConfig({ voice: agent.realtimeVoice }, 'gemini_live');
+  publishSessionConfig(room, {
+    callId,
+    direction,
+    agentName: agent.name,
+    realtimeS2s: realtimeS2sUserConfigToSessionConfig(s2sConfig, 'studio_default', 'gemini_live'),
+    appliedVoice: s2sConfig.voice,
+  });
+  console.info(
+    `[vsa] Gemini Live S2S started — voice=${s2sConfig.voice} model=${s2sConfig.model}${telephony ? ' telephony=1' : ''}`,
+  );
+
+  return { session, room, resolved, bookingLock, agentGender };
+}
+
+function attachLiveCallGuards(live: LiveCall): void {
+  const { session, room, resolved, bookingLock, agentGender } = live;
+  const { agent, callId } = resolved;
+  attachCallTelemetry(session, room);
+  attachCallTranscriptPersist(session, room, callId);
+  attachSilenceWatchdog(session, agent.skillsConfig, {
+    agentName: agent.name,
+    productName: agent.productName,
+  });
+  attachResponseWatchdog(session, { agentGender });
+  attachRepeatSpeechGuard(session);
+  attachSessionGuards(session, { bookingLock, agentGender });
+}
+
+async function speakOutboundOpener(
+  session: voice.AgentSession,
+  resolved: LoadedCall,
+): Promise<void> {
+  if (resolved.direction !== 'outbound') return;
+  let callerSpoke = false;
+  const onItem = (ev: { item?: { role?: string; textContent?: string | null } }) => {
+    const text = (ev.item?.textContent ?? '').trim();
+    if (ev.item?.role === 'user' && text && !text.startsWith('[SYSTEM:')) callerSpoke = true;
+  };
+  const onSpeech = (ev: { userInitiated: boolean; speechHandle: { interrupt: (force?: boolean) => unknown } }) => {
+    if (callerSpoke || ev.userInitiated) return;
+    console.warn('OPENER_HOLD', 'dropped extra speech before the caller answered the greeting');
+    ev.speechHandle.interrupt(true);
+  };
+  session.on(voice.AgentSessionEventTypes.ConversationItemAdded, onItem as never);
+  session.on(voice.AgentSessionEventTypes.SpeechCreated, onSpeech as never);
+  try {
+    await session
+      .generateReply({
+        instructions: buildOutboundOpenerInstructions(resolved.agent, resolved.prospectName),
+        allowInterruptions: true,
+        toolChoice: 'none',
+      })
+      .waitForPlayout();
+  } catch (err) {
+    console.warn(
+      '[vsa] Outbound opener generateReply failed — model should greet on first caller audio:',
+      err instanceof Error ? err.message : err,
+    );
+  }
+  // The extra city question starts as soon as the greeting ends. After a short beat, stop
+  // interrupting — a later reply to the real caller must be allowed.
+  setTimeout(() => {
+    session.off(voice.AgentSessionEventTypes.ConversationItemAdded, onItem as never);
+    session.off(voice.AgentSessionEventTypes.SpeechCreated, onSpeech as never);
+  }, 2_500).unref?.();
+}
+
 export default defineAgent({
   entry: async (ctx) => {
     // Prefer job room name before connect — ctx.room.name can still be empty early.
@@ -273,6 +424,9 @@ export default defineAgent({
     const participant = await ctx.waitForParticipant();
     const telephony = isSipParticipant(participant);
 
+    const loadCall = () =>
+      resolveAgentFromRoom(roomName, ctx.room.metadata, participant.metadata);
+
     if (telephony) {
       console.info(
         'AGENT_V2_WAITING_FOR_SIP_ANSWER',
@@ -283,9 +437,40 @@ export default defineAgent({
         }),
       );
 
+      // Prompt + Gemini connect while the phone is still ringing. Audio stays
+      // held so ringback is not heard and nothing is spoken before answer.
+      const preconnect = loadCall()
+        .then((resolved) =>
+          beginVoiceSession({
+            room: ctx.room,
+            roomName,
+            telephony: true,
+            resolved,
+            holdUntilAnswer: true,
+          }),
+        )
+        .catch((err) => {
+          console.warn(
+            '[vsa] Ring preconnect failed — will start after answer:',
+            err instanceof Error ? err.message : err,
+          );
+          return null;
+        });
+
       const sipResult = await waitForSipAnswered(ctx.room, participant, { roomName });
 
       if (!sipResult.answered) {
+        const warm = await preconnect;
+        if (warm) {
+          try {
+            await warm.session.close();
+          } catch (err) {
+            console.warn(
+              '[vsa] Failed to close preconnected session after non-answer',
+              err instanceof Error ? err.message : err,
+            );
+          }
+        }
         if (sipResult.reason === 'timeout') {
           console.warn(
             'AGENT_V2_SIP_ANSWER_TIMEOUT',
@@ -325,7 +510,6 @@ export default defineAgent({
           }
         }
 
-        // Do not start AgentSession / greeting while still dialing or unanswered.
         try {
           await ctx.deleteRoom(roomName || undefined);
         } catch (err) {
@@ -338,7 +522,6 @@ export default defineAgent({
         return;
       }
 
-      // Strict: only log CUSTOMER_ANSWERED when status is active.
       console.info(
         'CUSTOMER_ANSWERED',
         JSON.stringify({
@@ -347,182 +530,58 @@ export default defineAgent({
           sipCallStatus: sipResult.status,
         }),
       );
-      console.info('[vsa] SIP answered (active) — starting agent session');
-    }
 
-    const { agent, callId, direction, prospectName, contactPhone, contactEmail } =
-      await resolveAgentFromRoom(
+      const warm = await preconnect;
+      const live = warm ?? (await beginVoiceSession({
+        room: ctx.room,
         roomName,
-        ctx.room.metadata,
-        participant.metadata,
-      );
-
-    if (telephony && callId) {
-      void patchCallStatus(callId, 'in-progress').catch((err) => {
-        console.warn(
-          '[vsa] Failed to mark call in-progress',
-          err instanceof Error ? err.message : err,
-        );
-      });
-    }
-
-    console.info(
-      'AGENT_SESSION_STARTING',
-      JSON.stringify({
-        roomName,
-        callId: callId ?? null,
-        telephony,
-        voicePipeline: agent.voicePipeline ?? null,
-      }),
-    );
-
-    const speakLanguages = parseVoiceLanguages(agent.voiceLanguages);
-    const sttProvider = normalizeSttProvider(agent.sttProvider);
-    const latency = getLatencyConfig(sttProvider, { telephony });
-    const useRealtimeS2s = isS2sPipeline(agent.voicePipeline);
-    const useGeminiLive = isGeminiLivePipeline(agent.voicePipeline);
-    const vad = useRealtimeS2s ? undefined : createCallVad(latency.vad);
-
-    const session = useRealtimeS2s
-      ? new voice.AgentSession({
-          // OpenAI Realtime / Gemini Live own STT + TTS + turn detection.
-          turnHandling: {
-            turnDetection: 'realtime_llm',
-            interruption: {
-              minDuration: latency.interruption.minDuration,
-              minWords: latency.interruption.minWords,
-              resumeFalseInterruption: latency.interruption.resumeFalseInterruption,
-              falseInterruptionTimeout: latency.interruption.falseInterruptionTimeout,
-            },
-          },
-          // Phone: shorter AEC warmup so mid-sentence barge works sooner (~3s felt "deaf").
-          aecWarmupDuration: telephony ? latency.aecWarmupDuration : undefined,
-          ttsReadIdleTimeout: 20_000,
-        })
-      : new voice.AgentSession({
-          stt: createStt(agent, {
-            languages: speakLanguages,
-            sampleRate: 16000,
-            vad,
-            onError: (message) => publishCallError(ctx.room, message, 'stt'),
-          }),
-          vad: vad!,
-          turnHandling: {
-            turnDetection: 'vad',
-            endpointing: latency.endpointing,
-            preemptiveGeneration: {
-              enabled: latency.preemptiveGeneration.enabled,
-              preemptiveTts: latency.preemptiveGeneration.preemptiveTts,
-              maxSpeechDuration: latency.preemptiveGeneration.maxSpeechDuration,
-              maxRetries: latency.preemptiveGeneration.maxRetries,
-            },
-            interruption: {
-              minDuration: latency.interruption.minDuration,
-              minWords: latency.interruption.minWords,
-              resumeFalseInterruption: latency.interruption.resumeFalseInterruption,
-              falseInterruptionTimeout: latency.interruption.falseInterruptionTimeout,
-            },
-          },
-          aecWarmupDuration: telephony ? latency.aecWarmupDuration : undefined,
-          ttsReadIdleTimeout: 20_000,
-        });
-
-    const voiceAgent = createVoiceAgent(
-      agent,
-      callId,
-      direction,
-      prospectName,
-      contactPhone,
-      contactEmail,
-      ctx.room,
-      { telephony },
-    );
-
-    await session.start({
-      agent: voiceAgent,
-      room: ctx.room,
-      inputOptions: {
-        // Gemini Live expects 16 kHz; OpenAI Realtime uses 24 kHz.
-        audioSampleRate: useGeminiLive ? 16000 : useRealtimeS2s ? 24000 : 16000,
-        audioNumChannels: 1,
-        noiseCancellation: resolveNoiseCancellation({ telephony }),
-        deleteRoomOnClose: true,
-      },
-    });
-
-    console.info(
-      'AGENT_SESSION_STARTED',
-      JSON.stringify({
-        roomName,
-        callId: callId ?? null,
-        telephony,
-      }),
-    );
-
-    // Ambient office tone can confuse Gemini Live VAD — only for cascaded / OpenAI.
-    const ambient = useGeminiLive
-      ? { close: async () => undefined }
-      : await startAmbientAudio(ctx.room, session);
-    ctx.addShutdownCallback(() => ambient.close());
-
-    attachCallTelemetry(session, ctx.room);
-    attachCallTranscriptPersist(session, ctx.room, callId);
-    attachSilenceWatchdog(session, agent.skillsConfig);
-
-    if (useRealtimeS2s) {
-      const pipeline = isGeminiLivePipeline(agent.voicePipeline) ? 'gemini_live' : 'openai_realtime';
-      const s2sConfig =
-        agent.realtimeS2sConfig ??
-        normalizeRealtimeS2sUserConfig({ voice: agent.realtimeVoice }, pipeline);
-      const sessionConfig = realtimeS2sUserConfigToSessionConfig(s2sConfig, 'studio_default', pipeline);
-      publishSessionConfig(ctx.room, {
-        callId,
-        direction,
-        agentName: agent.name,
-        realtimeS2s: sessionConfig,
-        appliedVoice: s2sConfig.voice,
-      });
-      console.info(
-        `[vsa] S2S call started — provider=${s2sConfig.provider} voice=${s2sConfig.voice} model=${s2sConfig.model}${telephony ? ' telephony=1' : ''}`,
-      );
-    } else {
-      console.info(
-        `[vsa] Cascaded call started — STT=${agent.sttProvider ?? 'azure'} model=${agent.sttModel || '(default)'}`,
-      );
-    }
-
-    if (direction === 'outbound') {
-      try {
-        // Realtime models cannot use allowInterruptions:false; Gemini 3.1 cannot generateReply
-        // (remapped to 2.5 on telephony). allowInterruptions must stay true for server VAD.
-        await session
-          .generateReply({
-            instructions: buildOutboundOpenerInstructions(agent, prospectName),
-            allowInterruptions: true,
-            toolChoice: 'none',
-          })
-          .waitForPlayout();
-      } catch (err) {
-        console.warn(
-          '[vsa] Outbound opener generateReply failed — model should greet on first caller audio:',
-          err instanceof Error ? err.message : err,
-        );
+        telephony: true,
+        resolved: await loadCall(),
+        holdUntilAnswer: false,
+      }));
+      if (warm) {
+        live.session.input.setAudioEnabled(true);
+        live.session.output.setAudioEnabled(true);
+        const io = (live.session as { _roomIO?: { inputOptions: { deleteRoomOnClose: boolean } } })
+          ._roomIO;
+        if (io) io.inputOptions.deleteRoomOnClose = true;
+        console.info('[vsa] SIP answered — preconnected Gemini unmuted');
       }
+      if (live.resolved.callId) {
+        void patchCallStatus(live.resolved.callId, 'in-progress').catch((err) => {
+          console.warn(
+            '[vsa] Failed to mark call in-progress',
+            err instanceof Error ? err.message : err,
+          );
+        });
+      }
+      attachLiveCallGuards(live);
+      await speakOutboundOpener(live.session, live.resolved);
+      return;
     }
+
+    const resolved = await loadCall();
+    const live = await beginVoiceSession({
+      room: ctx.room,
+      roomName,
+      telephony: false,
+      resolved,
+      holdUntilAnswer: false,
+    });
+    attachLiveCallGuards(live);
+    await speakOutboundOpener(live.session, live.resolved);
   },
 });
 
 async function boot() {
-  try {
-    await probeAzureSpeechKey();
-    console.info('[vsa] Azure Speech key OK — STT ready (cascaded pipeline)');
-  } catch (err) {
+  const geminiKey = process.env.GEMINI_API_KEY?.trim() || process.env.GOOGLE_API_KEY?.trim();
+  if (!geminiKey) {
     console.error(
-      '[vsa] Azure Speech not ready — cascaded agents will not hear callers until AZURE_SPEECH_KEY is fixed (S2S pipelines do not need Azure):',
-      err instanceof Error ? err.message : String(err),
+      '[vsa] GEMINI_API_KEY (or GOOGLE_API_KEY) is required — Gemini Live is the only voice pipeline',
     );
+  } else {
+    console.info('[vsa] Gemini Live voice pipeline ready');
   }
-  probeSarvamApiKey();
 
   cli.runApp(
     new ServerOptions({

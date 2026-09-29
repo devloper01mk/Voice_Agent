@@ -8,6 +8,7 @@ import {
   type RealtimeS2sUserConfig,
   type SkillsConfig,
 } from '@vsa/shared';
+import { apiFetch } from './api-fetch.js';
 
 export interface RuntimeAgent {
   id: string;
@@ -84,9 +85,8 @@ async function fetchCallSessionConfig(
   realtimeVoice?: string;
   realtimeS2sConfig?: RealtimeS2sUserConfig;
 } | null> {
-  const apiUrl = process.env.API_URL ?? 'http://localhost:3001';
   try {
-    const res = await fetch(`${apiUrl}${SESSION_CONFIG_PATH}/${callId}/session-config`);
+    const res = await apiFetch(`${SESSION_CONFIG_PATH}/${callId}/session-config`);
     if (!res.ok) return null;
     return (await res.json()) as {
       voicePipeline?: string;
@@ -102,13 +102,12 @@ export async function fetchRuntimeAgent(
   agentId: string,
   options?: RuntimeFetchOptions,
 ): Promise<RuntimeAgent> {
-  const apiUrl = process.env.API_URL ?? 'http://localhost:3001';
   const params = new URLSearchParams();
   if (options?.prospectName?.trim()) params.set('prospectName', options.prospectName.trim());
   if (options?.contactPhone?.trim()) params.set('contactPhone', options.contactPhone.trim());
   if (options?.contactEmail?.trim()) params.set('contactEmail', options.contactEmail.trim());
   const qs = params.size ? `?${params.toString()}` : '';
-  const res = await fetch(`${apiUrl}${RUNTIME_PATH}/${agentId}/runtime${qs}`);
+  const res = await apiFetch(`${RUNTIME_PATH}/${agentId}/runtime${qs}`);
   if (!res.ok) {
     throw new Error(`Failed to load agent ${agentId}: ${res.status}`);
   }

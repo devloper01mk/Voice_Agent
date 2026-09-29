@@ -14,7 +14,6 @@ import {
   normalizeRealtimeS2sUserConfig,
   normalizeVoicePipeline,
   resolveGeminiLiveVoice,
-  resolveRealtimeVoice,
   type RealtimeS2sUserConfig,
   type VoicePipeline,
 } from '@vsa/shared';
@@ -48,6 +47,18 @@ export function livekitSipConfigError(): string | null {
     return 'LIVEKIT_SIP_OUTBOUND_TRUNK is not configured (LiveKit Cloud → SIP → Outbound trunk)';
   }
   return null;
+}
+
+/**
+ * E.164 for SIP headers. Tata/Smartflo rejects a From without the leading `+`,
+ * so the country code must survive normalization (bare 10-digit ⇒ +91).
+ */
+export function toE164(raw?: string | null): string | undefined {
+  const digits = String(raw ?? '').replace(/\D/g, '');
+  if (!digits) return undefined;
+  if (digits.length === 10) return `+91${digits}`;
+  if (digits.length === 11 && digits.startsWith('0')) return `+91${digits.slice(1)}`;
+  return `+${digits}`;
 }
 
 /** Mask phone for logs — keep last 4 digits only. */
@@ -266,16 +277,13 @@ export function buildLivekitSipSessionMeta(input: {
 }): { roomMetadata: string; participantMetadata: string; v2Session: Simulator2CallSessionPayload } {
   const voicePipeline = normalizeVoicePipeline(input.voicePipeline);
   let realtimeS2sConfig = input.realtimeS2sConfig;
-  const realtimeVoice =
-    voicePipeline === 'gemini_live'
-      ? resolveGeminiLiveVoice(realtimeS2sConfig?.voice ?? input.realtimeVoice)
-      : resolveRealtimeVoice(realtimeS2sConfig?.voice ?? input.realtimeVoice);
+  const realtimeVoice = resolveGeminiLiveVoice(
+    realtimeS2sConfig?.voice ?? input.realtimeVoice,
+  );
   if (realtimeS2sConfig) {
     realtimeS2sConfig = normalizeRealtimeS2sUserConfig(
       { ...realtimeS2sConfig, voice: realtimeVoice },
-      voicePipeline === 'openai_realtime' || voicePipeline === 'gemini_live'
-        ? voicePipeline
-        : undefined,
+      'gemini_live',
     );
   }
 
@@ -337,9 +345,9 @@ export async function placeLivekitSipOutbound(opts: {
   const fromNumberMode = useDefaultTrunkCallerId ? 'trunk_default' : 'explicit';
 
   const explicitFrom =
-    opts.fromNumber?.replace(/\D/g, '') ||
-    process.env.LIVEKIT_SIP_FROM_NUMBER?.replace(/\D/g, '') ||
-    process.env.ACEFONE_FROM_NUMBER?.replace(/\D/g, '') ||
+    toE164(opts.fromNumber) ||
+    toE164(process.env.LIVEKIT_SIP_FROM_NUMBER) ||
+    toE164(process.env.ACEFONE_FROM_NUMBER) ||
     undefined;
   const fromNumber = useDefaultTrunkCallerId ? undefined : explicitFrom;
 
@@ -408,6 +416,7 @@ export async function placeLivekitSipOutbound(opts: {
       sipCallToMasked: maskPhone(opts.toNumber),
       fromNumberMasked: useDefaultTrunkCallerId ? '(trunk_default)' : maskPhone(fromNumber),
       fromNumberMode,
+      fromNumberE164: Boolean(fromNumber?.startsWith('+')),
       participantIdentity: identity,
       waitUntilAnswered,
       playDialtone,

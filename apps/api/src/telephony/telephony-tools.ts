@@ -15,11 +15,21 @@ import {
   resolveHotelMatchForApi,
   queryNexoraHotelFacts,
   assertLiveStayInventoryForBooking,
+  parseStayRoomTypeList,
   lockSpokenHinglishGender,
+  PRODUCT_KNOWLEDGE_SEARCH_TOOL,
+  PRODUCT_KNOWLEDGE_SEARCH_TOOL_DESCRIPTION,
   type BookingPolicy,
   type KnownContactProfile,
 } from '@vsa/shared';
 import { internalApiUrl } from './internal-api.js';
+import { productKnowledgeToolPayload, searchProductKnowledge } from '../product-knowledge.js';
+import { authHeadersForServerFetch } from '../auth.js';
+
+const apiJsonHeaders = () => ({
+  'Content-Type': 'application/json',
+  ...authHeadersForServerFetch(),
+});
 
 export interface TelephonyToolContext {
   agentId: string;
@@ -118,7 +128,8 @@ export function createTelephonyTools(
                   },
                   room_name: {
                     type: 'string',
-                    description: 'Room type the caller chose — re-checked live before save',
+                    description:
+                      'Room type(s) chosen — one name or several exact names joined by " + " / commas. Re-checked live as known.room_type string[].',
                   },
                   hotel_name: {
                     type: 'string',
@@ -134,6 +145,23 @@ export function createTelephonyTools(
             email_skipped: { type: 'boolean' },
             name_confirmed: { type: 'boolean' },
             phone_confirmed: { type: 'boolean' },
+            ...((policy.customFields ?? []).length
+              ? {
+                  details: {
+                    type: 'object',
+                    description: 'Playbook details collected on this call',
+                    properties: Object.fromEntries(
+                      (policy.customFields ?? []).map((f) => [
+                        f.key,
+                        {
+                          type: 'string',
+                          description: `${f.label}${f.required ? ' (required before save)' : ''} — exactly as the caller said it`,
+                        },
+                      ]),
+                    ),
+                  },
+                }
+              : {}),
             ...bookingDiscussGateToolProperties(policy),
           },
           required: ['preferred_time'],
@@ -164,6 +192,23 @@ export function createTelephonyTools(
             phone_confirmed: { type: 'boolean' },
           },
           required: ['preferred_time'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: PRODUCT_KNOWLEDGE_SEARCH_TOOL,
+        description: PRODUCT_KNOWLEDGE_SEARCH_TOOL_DESCRIPTION,
+        parameters: {
+          type: 'object',
+          properties: {
+            query: {
+              type: 'string',
+              description: 'Short English keyword query for the product detail the caller asked about',
+            },
+          },
+          required: ['query'],
         },
       },
     },
@@ -204,16 +249,19 @@ export function createTelephonyTools(
       function: {
         name: 'lookup_hotel_availability',
         description:
-          'REQUIRED when the caller names a clear city and/or state. Live inventory. ' +
-          'Pass city only if they named a city; state only if they named a state; both if they named both. ' +
+          'REQUIRED when the caller names a clear city and/or state (and again as they add date/room). Live Hotel inventory via progressive known filters. ' +
+          'TOOL-FIRST: invoke IMMEDIATELY with ZERO spoken audio first — no "That means check-in…", no weekday/month readback before the result. ' +
+          'Resolve relative dates silently into YYYY-MM-DD. Speak ONLY from say after the tool returns. ' +
+          'Pass ONLY what they have said so far — never invent or send empty fields. ' +
+          'Turn 1 state-only → state. Turn 2 city → city (+ state if already known). Turn 3 room → room_type or room_name. Turn 4 date → date. ' +
           'English values (ऋषिकेश→Rishikesh, उत्तराखंड→Uttarakhand). Do NOT invent state when only city was said. ' +
           'Do NOT call this for vague places (landmark/area/"pahad"/unclear) — first clarify nearest city or offer 2–3 city choices, then call with that city. ' +
-          'Every different city = a NEW call. Speak ONLY from the tool result. ' +
+          'Every new city / room / date = a NEW call with the growing known set. Speak ONLY from the tool result. ' +
           'Never invent beds/prices/room names (no Suite unless listed). Never deny a city from Product Knowledge alone. ' +
-          'When ok:true, live rates are spoken from "say" — do NOT invent "call later" or re-read the full list. ' +
+          'When ok:true, speak from "say" right after the result (short) — do NOT invent "call later", do NOT re-read the full list, do NOT re-confirm dates. ' +
           'When fallback_to_brain:true, never deny the city; never invent live beds/prices. ' +
           'MULTI-PROPERTY: if say asks which property, ask Hostel vs Resort — do NOT pitch dorm rates as the whole city. ' +
-          'When they pick Resort / premium / Suite, call AGAIN with hotel_name (e.g. Resort) and room_name if named.',
+          'When they pick Resort / premium / Suite, call AGAIN with hotel_name (e.g. Resort) and room_type/room_name if named.',
         parameters: {
           type: 'object',
           properties: {
@@ -235,7 +283,22 @@ export function createTelephonyTools(
             room_name: {
               type: 'string',
               description:
-                'Room type if they named one (Suite, Private Double Room, …). Prefer property that has this type.',
+                'Room type(s) if named. One name, or several exact names joined by " + " / commas. Sent as known.room_type string[].',
+            },
+            room_type: {
+              type: 'string',
+              description:
+                'Same as room_name — preferred for known.room_type (one name or "A + B + C").',
+            },
+            date: {
+              type: 'string',
+              description:
+                'Stay date only after they named one. Omit until they give a date.',
+            },
+            price_per_night: {
+              type: 'string',
+              description:
+                'Only if they named a budget/price filter. Omit otherwise.',
             },
           },
         },
@@ -262,6 +325,20 @@ export async function executeTelephonyTool(
 
   if (name === 'capture_demo_lead') return captureDemoLead(args, ctx);
   if (name === 'lookup_hotel_availability') return lookupHotelAvailability(args, ctx);
+  if (name === PRODUCT_KNOWLEDGE_SEARCH_TOOL) {
+    const query = typeof args.query === 'string' ? args.query : '';
+    if (!query.trim()) return { ok: false, error: 'query is required' };
+    try {
+      return productKnowledgeToolPayload(await searchProductKnowledge(ctx.agentId, query));
+    } catch (err) {
+      console.warn('[telephony] search_product_knowledge failed:', err instanceof Error ? err.message : err);
+      return {
+        ok: false,
+        found: false,
+        rule: 'Knowledge search is unavailable right now. Answer only from Product Knowledge in your instructions; if it is not there, offer a callback — never guess.',
+      };
+    }
+  }
   if (name === 'schedule_callback') return scheduleCallback(args, ctx);
   if (name === 'update_demo_lead_name') return updateDemoLeadName(args, ctx);
   if (name === 'end_call') {
@@ -303,7 +380,17 @@ async function lookupHotelAvailability(
   );
   const explicitState = typeof args.state === 'string' ? args.state.trim() : '';
   const hotelName = typeof args.hotel_name === 'string' ? args.hotel_name.trim() : '';
-  const roomName = typeof args.room_name === 'string' ? args.room_name.trim() : '';
+  const roomTypes = parseStayRoomTypeList(
+    (typeof args.room_type === 'string' ? args.room_type.trim() : '') ||
+      (typeof args.room_name === 'string' ? args.room_name.trim() : '') ||
+      '',
+  );
+  const date = typeof args.date === 'string' ? args.date.trim() : '';
+  const priceRaw = args.price_per_night;
+  const price_per_night =
+    typeof priceRaw === 'number' || typeof priceRaw === 'string'
+      ? priceRaw
+      : undefined;
   const match = resolveHotelMatchForApi({
     city: asked || undefined,
     state: explicitState || undefined,
@@ -314,9 +401,18 @@ async function lookupHotelAvailability(
   const result = await queryNexoraHotelFacts(query, {
     signal: AbortSignal.timeout(2_500),
     ...(match.state ? { state: match.state } : {}),
+    ...(date ? { date } : {}),
+    ...(roomTypes.length ? { room_type: roomTypes } : {}),
+    ...(price_per_night != null && String(price_per_night).trim()
+      ? { price_per_night }
+      : {}),
     prefer: {
       ...(hotelName ? { hotel: hotelName } : {}),
-      ...(roomName ? { room: roomName } : {}),
+      ...(roomTypes.length === 1
+        ? { room: roomTypes[0] }
+        : roomTypes.length > 1
+          ? { rooms: roomTypes, room: roomTypes[0] }
+          : {}),
     },
   });
   const compact = compactHotelFactsForLlm(result);
@@ -331,7 +427,8 @@ async function lookupHotelAvailability(
       city: query || undefined,
       state: match.state,
       hotel_name: hotelName || undefined,
-      room_name: roomName || undefined,
+      room_type: roomTypes.length ? roomTypes : undefined,
+      date: date || undefined,
       ok: result.ok,
       hotel: result.ok ? result.hotel_name : undefined,
       matchedCity: result.ok ? result.city : undefined,
@@ -381,7 +478,7 @@ async function captureDemoLead(
     return {
       ok: false,
       error: 'Phone not confirmed',
-      hint: `Read back EXACTLY: "${spokenPhoneForReadBack(resolvedPhone)}" — get yes/haan, then retry with phone_confirmed=true.`,
+      hint: `Speak VERBATIM (never paraphrase, never say double/triple): "${spokenPhoneForReadBack(resolvedPhone)}" — then ask yeh sahi hai? Get yes/haan, then retry with phone_confirmed=true.`,
       readBackSpeech: spokenPhoneForReadBack(resolvedPhone),
     };
   }
@@ -409,6 +506,7 @@ async function captureDemoLead(
       city: typeof args.city === 'string' ? args.city : undefined,
       hotel_name: typeof args.hotel_name === 'string' ? args.hotel_name : undefined,
       room_name: typeof args.room_name === 'string' ? args.room_name : undefined,
+      preferred_time: preferredTime || undefined,
       notes,
       signal: AbortSignal.timeout(2_500),
     });
@@ -439,7 +537,7 @@ async function captureDemoLead(
 
   const res = await fetch(`${internalApiUrl()}/api/leads`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: apiJsonHeaders(),
     body: JSON.stringify({
       agentId: ctx.agentId,
       callId: ctx.callId,
@@ -449,6 +547,7 @@ async function captureDemoLead(
       preferredTime,
       bookingType: resolvedBookingType,
       locationType: policy.locationType,
+      ...(args.details && typeof args.details === 'object' ? { details: args.details } : {}),
       productInterest: notes,
       notes: notes ? `${notes} | email skipped on call` : 'email skipped on call',
       paymentDiscussed: args.payment_discussed === true,
@@ -545,7 +644,7 @@ async function scheduleCallback(
 
   const res = await fetch(`${internalApiUrl()}/api/leads/callback`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: apiJsonHeaders(),
     body: JSON.stringify({
       agentId: ctx.agentId,
       callId: ctx.callId,
@@ -586,7 +685,7 @@ async function updateDemoLeadName(
   }
   const res = await fetch(`${internalApiUrl()}/api/leads/by-call/${ctx.callId}/name`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
+    headers: apiJsonHeaders(),
     body: JSON.stringify({ agentId: ctx.agentId, name: resolvedName }),
   });
   if (!res.ok) {

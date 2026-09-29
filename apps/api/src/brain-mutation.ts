@@ -156,7 +156,7 @@ async function processBrainMutation(
   let extracted: ExtractResult = {};
   try {
     extracted = await callLlmJson<ExtractResult>({
-      llmProvider: agent.llmProvider as 'groq' | 'gpt',
+      llmProvider: 'gpt',
       llmModel: agent.llmModel,
       system: EXTRACT_SYSTEM,
       user: `Product: ${agent.productName}

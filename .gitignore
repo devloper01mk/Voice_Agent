@@ -7,3 +7,5 @@ dist
 .DS_Store
 *.zip
 *.mp3
+*.tsbuildinfo
+*.pdf

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CallMetricsSummary, TranscriptLine } from '../api';
+import { apiAuthQueryParam } from '../api';
 import type { TelephonyLogEntry } from '../components/TelephonyLogPanel';
 
 export type TelephonyAgentState = 'listening' | 'thinking' | 'speaking' | null;
@@ -61,7 +62,10 @@ export function useTelephonyEvents(callId: string | null) {
       return;
     }
 
-    const es = new EventSource(`/api/telephony/calls/${callId}/events`);
+    const authQ = apiAuthQueryParam();
+    const es = new EventSource(
+      `/api/telephony/calls/${callId}/events${authQ ? `?${authQ}` : ''}`,
+    );
 
     es.onopen = () => setConnected(true);
     es.onerror = () => setConnected(false);

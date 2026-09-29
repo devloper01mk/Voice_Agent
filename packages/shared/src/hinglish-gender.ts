@@ -87,10 +87,18 @@ export function appendHinglishGenderLock(
   return `${stripped}\n\n${lock}`;
 }
 
+/** Remove only the lock section — sections appended after it (e.g. S2S supplement) must survive. */
 function stripGenderLockSection(prompt: string): string {
-  const idx = prompt.lastIndexOf(GENDER_LOCK_HEADING);
-  if (idx < 0) return prompt;
-  return prompt.slice(0, idx).trimEnd();
+  let out = prompt;
+  for (;;) {
+    const idx = out.lastIndexOf(GENDER_LOCK_HEADING);
+    if (idx < 0) return out;
+    const afterHeading = idx + GENDER_LOCK_HEADING.length;
+    const nextRel = out.slice(afterHeading).search(/\n## /);
+    const before = out.slice(0, idx).trimEnd();
+    const after = nextRel >= 0 ? out.slice(afterHeading + nextRel).trimStart() : '';
+    out = after ? `${before}\n\n${after}` : before;
+  }
 }
 
 function toFemale(text: string): string {

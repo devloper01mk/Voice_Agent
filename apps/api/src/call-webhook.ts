@@ -1,5 +1,5 @@
 import { createHmac } from 'node:crypto';
-import { linesFromTranscriptPayload } from '@vsa/shared';
+import { linesFromTranscriptPayload, summarizeNegotiationLedger, type NegotiationLedgerEvent } from '@vsa/shared';
 import { prisma } from './db.js';
 
 export type CallDisposition =
@@ -24,6 +24,9 @@ export type CallIntent =
   | 'other';
 
 export type CallSentiment = 'positive' | 'neutral' | 'negative';
+
+/** Free-text arc of what the caller felt this call (not a fixed enum). */
+export type CallSentimentArc = string;
 
 export interface CallCompletedBookingPayload {
   booked: boolean;
@@ -93,7 +96,8 @@ export interface CallCompletedWebhookPayload {
   };
   post_call_analysis: {
     disposition: CallDisposition;
-    sentiment: CallSentiment;
+    /** Dynamic call arc — whatever moods showed up this call (not limited to positive/neutral/negative). */
+    sentiment: CallSentimentArc;
     goals_met: boolean;
   };
   /** @deprecated Prefer `booking` + `contact`. Kept for older consumers. */
@@ -112,6 +116,8 @@ export interface CallCompletedWebhookPayload {
   contactPhone?: string | null;
   contactEmail?: string | null;
   externalCallId?: string | null;
+  /** Present only when this call recorded negotiation decisions. */
+  negotiation?: ReturnType<typeof summarizeNegotiationLedger>;
 }
 
 const TERMINAL_STATUSES = new Set([
@@ -127,13 +133,103 @@ const NOT_INTERESTED_RE =
   /\b(not interested|no need|stop calling|don'?t call|mat call|call mat karo|interest nahi|nahi chahiye)\b/i;
 
 const POSITIVE_RE =
-  /\b(thank|dhanyavad|book|confirm|theek hai|haan ji|interested|demo|visit|callback)\b/i;
+  /\b(thank|thanks|dhanyavad|dhanyavaad|book|confirm|theek hai|thik hai|haan ji|interested|demo|visit|callback|bilkul|sahi hai)\b|धन्यवाद|शुक्रिया|ठीक\s*है|हाँ\s*जी|हां\s*जी|सही\s*है/i;
 
 const NEGATIVE_RE =
-  /\b(not interested|no need|stop calling|don'?t call|mat call|busy now|call mat)\b/i;
+  /\b(not interested|no need|stop calling|don'?t call|mat call|busy now|call mat|rehne\s+dijiye|rehne\s+do|galat\s+hai|bakwas|bekaar|gussa|naraz|frustrated|angry)\b|नहीं\s*चाहिए|रहने\s*दीजिए|गलत\s*है|गुस्सा|नाराज|बकवास/i;
 
 const WANT_BOOK_RE =
-  /\b(book|booking|reserve|reservation|room\s*chahiye|book\s*kar|confirm\s*kar|le\s*lunga|le\s*lenge|stay\s*kar|check[\s-]?in)\b|बुक|कमरा\s*चाहि|रूम\s*चाहि/i;
+  /\b(book|booking|reserve|reservation|room\s*chahiye|book\s*kar|confirm\s*kar|le\s*lunga|le\s*lenge|stay\s*kar|check[\s-]?in|start\s+kar)\b|बुक|कमरा\s*चाहि|रूम\s*चाहि|स्टार्ट\s*कर/i;
+
+/** Ordered detectors — first match wins per user turn; arc keeps chronological unique phases. */
+const SENTIMENT_ARC_DETECTORS: Array<{ label: string; re: RegExp }> = [
+  {
+    label: 'angry',
+    re: /\b(gussa|gusaa|naraz|angry|madarchod|bhenchod|harami|abuse)\b|गुस्सा|नाराज|गाली/i,
+  },
+  {
+    label: 'frustrated (phone)',
+    re: /\b(galat\s+hai|number\s+galat|10\s*digit|phone\s+galat|parsing\s+error|wrong\s+number)\b|गलत\s*है|नंबर.{0,20}गलत|10\s*डिजिट|फोन.{0,16}गलत/i,
+  },
+  {
+    label: 'frustrated (repeat)',
+    re: /\b(baar[\s-]*baar|hamesha\s+booking|pehle\s+bata|mat\s+jao\s+booking|atak\s+gay|jawab\s+to\s+de)\b|बार[\s-]*बार|हमेशा\s*बुकिंग|पहले\s*बता|अटक/i,
+  },
+  {
+    label: 'not interested',
+    re: /\b(not interested|no need|stop calling|don'?t call|mat call|interest nahi|nahi chahiye|rehne\s+dijiye|rehne\s+do)\b|नहीं\s*चाहिए|रहने\s*दीजिए|रहने\s*दो/i,
+  },
+  {
+    label: 'busy / callback',
+    re: /\b(busy|baad\s+mein|call\s+back|callback|later|time\s+nahi)\b|बाद\s*में|कॉल\s*बैक|व्यस्त/i,
+  },
+  {
+    label: 'confused',
+    re: /\b(samajh\s+nahi|clear\s+nahi|confused|kya\s+bola|dobara|phir\s+se\s+bata)\b|समझ\s*नहीं|क्लियर\s*नहीं|क्या\s*बोला|दोबारा/i,
+  },
+  {
+    label: 'price-sensitive',
+    re: /\b(kitna|kitne|price|pricing|cost|mehnga|budget|discount|sasta)\b|कितना|कितने|प्राइस|कीमत|डिस्काउंट|सस्ता|महंगा/i,
+  },
+  {
+    label: 'booking intent',
+    re: /\b(book|booking|reserve|confirm\s+kar|le\s+lunga|start\s+kar(?:\s+dijie|\s+do)?|party\s+size|check[\s-]?in)\b|बुक|बुकिंग|स्टार्ट\s*कर|यहां\s*पर\s*स्टार्ट|लोग\s*आ\s*रहे/i,
+  },
+  {
+    label: 'interested',
+    re: /\b(interested|dekhna|sunao|batao|bataiye|options|facilities|ghumne|sightseeing|available|hai\s+kya|mixed\s+dorm|dorm)\b|बताओ|बताइए|बता\s*सकते|घूमने|फैसिलिटी|उपलब्ध|है\s*क्या|जगह|मिक्स|डोर्म|बेड/i,
+  },
+  {
+    label: 'curious',
+    re: /\b(hello|hi+|namaste|who\s+is(?:\s+this|\s+calling)?|kaun\s+bol|kaise\s+ho)\b|हेलो|हैलो|नमस्ते|आप\s*कौन|कौन\s*बोल|कैसे\s*हो/i,
+  },
+  {
+    label: 'polite exit',
+    re: /\b(bye+|goodbye|thank\s*you|thanks|dhanyavad|dhanyavaad|ok\s+bye)\b|बाय+|गुडबाय|धन्यवाद|अलविदा/i,
+  },
+];
+
+export function inferCallSentiment(transcript: unknown): CallSentiment {
+  const userText = linesFromTranscriptPayload(transcript)
+    .filter((l) => l.role === 'user')
+    .map((l) => l.text)
+    .join(' ')
+    .toLowerCase();
+  if (!userText.trim()) return 'neutral';
+  if (NEGATIVE_RE.test(userText)) return 'negative';
+  if (POSITIVE_RE.test(userText)) return 'positive';
+  return 'neutral';
+}
+
+/**
+ * Build a free-text sentiment arc from this call's user turns.
+ * Not limited to positive/neutral/negative — only phases that actually appeared.
+ */
+export function inferCallSentimentArc(transcript: unknown): CallSentimentArc {
+  const userLines = linesFromTranscriptPayload(transcript)
+    .filter((l) => l.role === 'user')
+    .map((l) => (l.text ?? '').trim())
+    .filter(Boolean);
+
+  if (userLines.length === 0) return 'neutral (no caller speech)';
+
+  const phases: string[] = [];
+  for (const line of userLines) {
+    let hit: string | null = null;
+    for (const det of SENTIMENT_ARC_DETECTORS) {
+      if (det.re.test(line)) {
+        hit = det.label;
+        break;
+      }
+    }
+    if (!hit) continue;
+    if (phases[phases.length - 1] === hit) continue;
+    phases.push(hit);
+  }
+
+  if (phases.length === 0) return 'neutral conversation';
+  return phases.join(' → ');
+}
 
 type LeadRow = {
   id: string;
@@ -212,18 +308,6 @@ export function resolveCallDisposition(input: {
 
   if (status === 'completed' || outcome === 'completed') return 'completed';
   return 'failed';
-}
-
-export function inferCallSentiment(transcript: unknown): CallSentiment {
-  const userText = linesFromTranscriptPayload(transcript)
-    .filter((l) => l.role === 'user')
-    .map((l) => l.text)
-    .join(' ')
-    .toLowerCase();
-  if (!userText.trim()) return 'neutral';
-  if (NEGATIVE_RE.test(userText)) return 'negative';
-  if (POSITIVE_RE.test(userText)) return 'positive';
-  return 'neutral';
 }
 
 function userWantedToBook(transcript: unknown, booked: boolean): boolean {
@@ -388,6 +472,7 @@ export function buildCallCompletedPayload(call: {
     callbacksCount: call.callbacks.length,
   });
   const sentiment = inferCallSentiment(call.transcript);
+  const sentimentArc = inferCallSentimentArc(call.transcript);
   const primaryLead = call.leads[0];
   const booking = buildBookingPayload(primaryLead);
   const booked = Boolean(booking?.booked);
@@ -442,7 +527,7 @@ export function buildCallCompletedPayload(call: {
     transcript: transcriptPayload(call.transcript),
     post_call_analysis: {
       disposition,
-      sentiment,
+      sentiment: sentimentArc,
       goals_met: met,
     },
     // Legacy fields
@@ -509,6 +594,51 @@ async function postWebhook(url: string, payload: CallCompletedWebhookPayload): P
   throw lastErr instanceof Error ? lastErr : new Error('Webhook delivery failed');
 }
 
+async function withNegotiationAnalytics(
+  callId: string,
+  payload: CallCompletedWebhookPayload,
+): Promise<CallCompletedWebhookPayload> {
+  try {
+    const rows = await prisma.negotiationEvent.findMany({
+      where: { callId },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (!rows.length) return payload;
+    const events: NegotiationLedgerEvent[] = rows.map((row) => {
+      const stored = row.payload as Partial<NegotiationLedgerEvent>;
+      return {
+        at: stored.at ?? row.createdAt.toISOString(),
+        idempotencyKey: row.idempotencyKey,
+        round: row.round,
+        stage: row.stage as NegotiationLedgerEvent['stage'],
+        objections: stored.objections ?? (row.objection ? [row.objection] : []),
+        priorities: stored.priorities ?? [],
+        strategy: row.strategy as NegotiationLedgerEvent['strategy'],
+        action: row.action as NegotiationLedgerEvent['action'],
+        offerCode: row.offerCode || null,
+        offersConsidered: stored.offersConsidered ?? [],
+        outcome: row.outcome as NegotiationLedgerEvent['outcome'],
+        reasoningCode: row.reasoningCode,
+        quotedPrice: stored.quotedPrice ?? null,
+        bookingConverted: stored.bookingConverted ?? false,
+        concessionCode: stored.concessionCode ?? null,
+        estimatedBenefitCost: stored.estimatedBenefitCost ?? null,
+      };
+    });
+    return { ...payload, negotiation: summarizeNegotiationLedger(events) };
+  } catch (err) {
+    console.info(`[NEGOTIATION_ERROR] call_id=${callId} reason=${err instanceof Error ? err.message : 'analytics unavailable'}`);
+    return payload;
+  }
+}
+
+function transcriptLineCount(transcript: unknown): number {
+  if (!transcript || typeof transcript !== 'object') return 0;
+  if (Array.isArray(transcript)) return transcript.length;
+  const lines = (transcript as { lines?: unknown }).lines;
+  return Array.isArray(lines) ? lines.length : 0;
+}
+
 export async function dispatchCallCompletedWebhook(callId: string): Promise<void> {
   const urls = webhookUrls();
   if (!urls.length) {
@@ -553,7 +683,14 @@ export async function dispatchCallCompletedWebhook(callId: string): Promise<void
   if (call.webhookSentAt) return;
   if (!TERMINAL_STATUSES.has(call.status)) return;
 
-  const payload = buildCallCompletedPayload(call);
+  const noConversation =
+    call.status === 'no-answer' || call.status === 'busy' || call.status === 'failed';
+  if (!noConversation && transcriptLineCount(call.transcript) === 0) {
+    console.warn('[webhook] call.completed deferred until transcript is saved', { callId });
+    return;
+  }
+
+  const payload = await withNegotiationAnalytics(call.id, buildCallCompletedPayload(call));
   let delivered = false;
   const errors: string[] = [];
 

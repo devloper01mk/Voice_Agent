@@ -46,23 +46,6 @@ export function pcm16ToMulaw(pcm: Buffer): Buffer {
   return out;
 }
 
-/** Upsample 8 kHz mono PCM16 → 24 kHz with linear interpolation. */
-export function upsample8kTo24k(pcm8k: Buffer): Buffer {
-  const samples = pcm8k.length / 2;
-  if (samples === 0) return Buffer.alloc(0);
-  const out = Buffer.alloc(samples * 6);
-  for (let i = 0; i < samples; i++) {
-    const s = pcm8k.readInt16LE(i * 2);
-    const next = i + 1 < samples ? pcm8k.readInt16LE((i + 1) * 2) : s;
-    const mid1 = Math.round(s + (next - s) / 3);
-    const mid2 = Math.round(s + ((next - s) * 2) / 3);
-    out.writeInt16LE(s, i * 6);
-    out.writeInt16LE(mid1, i * 6 + 2);
-    out.writeInt16LE(mid2, i * 6 + 4);
-  }
-  return out;
-}
-
 /** Upsample 8 kHz mono PCM16 → 16 kHz with linear interpolation. */
 export function upsample8kTo16k(pcm8k: Buffer): Buffer {
   const samples = pcm8k.length / 2;
@@ -90,22 +73,4 @@ export function downsampleTo8k(pcm: Buffer, inputRate: number): Buffer {
     out.writeInt16LE(pcm.readInt16LE(src * 2), i * 2);
   }
   return out;
-}
-
-/** Pad mulaw buffer to a multiple of chunkBytes (Acefone: 160). */
-export function padMulawToChunks(mulaw: Buffer, chunkBytes = 160): Buffer {
-  if (mulaw.length === 0) return Buffer.alloc(chunkBytes, 0xff);
-  const rem = mulaw.length % chunkBytes;
-  if (rem === 0) return mulaw;
-  const pad = Buffer.alloc(chunkBytes - rem, 0xff);
-  return Buffer.concat([mulaw, pad]);
-}
-
-export function chunkMulaw(mulaw: Buffer, chunkBytes = 160): Buffer[] {
-  const padded = padMulawToChunks(mulaw, chunkBytes);
-  const chunks: Buffer[] = [];
-  for (let i = 0; i < padded.length; i += chunkBytes) {
-    chunks.push(padded.subarray(i, i + chunkBytes));
-  }
-  return chunks;
 }

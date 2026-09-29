@@ -1,10 +1,10 @@
-import { isGeminiLivePipeline, isS2sPipeline, normalizeVoicePipeline } from '@vsa/shared';
+import { normalizeVoicePipeline } from '@vsa/shared';
 import type { RealtimeS2sUserConfig } from '@vsa/shared';
 
 /** Per-call telephony session overrides (stored on Call.transcript). */
-export type TelephonyPipelineMode = 'agent' | 'cascaded' | 'openai_realtime' | 'gemini_live';
+export type TelephonyPipelineMode = 'agent' | 'gemini_live';
 
-export type TelephonyAppliedPipeline = 'cascaded' | 'openai_realtime' | 'gemini_live';
+export type TelephonyAppliedPipeline = 'gemini_live';
 
 export type TelephonyCallSessionPayload = {
   pipelineMode: TelephonyPipelineMode;
@@ -20,28 +20,15 @@ export function readTelephonySessionPayload(transcript: unknown): TelephonyCallS
 }
 
 export function normalizeTelephonyPipelineMode(raw?: string | null): TelephonyPipelineMode {
-  if (raw === 'cascaded') return 'cascaded';
-  if (raw === 'openai_realtime') return 'openai_realtime';
   if (raw === 'gemini_live') return 'gemini_live';
+  // Legacy cascaded / openai_realtime / agent → honor agent studio (always Gemini after removal)
   return 'agent';
 }
 
 export function resolveTelephonyAppliedPipeline(
-  pipelineMode: TelephonyPipelineMode,
-  agentVoicePipeline?: string | null,
+  _pipelineMode: TelephonyPipelineMode,
+  _agentVoicePipeline?: string | null,
 ): TelephonyAppliedPipeline {
-  if (pipelineMode === 'openai_realtime') return 'openai_realtime';
-  if (pipelineMode === 'gemini_live') return 'gemini_live';
-  if (pipelineMode === 'cascaded') return 'cascaded';
-  const agentPipeline = normalizeVoicePipeline(agentVoicePipeline);
-  if (isS2sPipeline(agentPipeline)) return agentPipeline;
-  return 'cascaded';
-}
-
-export function isTelephonyS2sPipeline(raw?: string | null): boolean {
-  return isS2sPipeline(raw);
-}
-
-export function isTelephonyGeminiLivePipeline(raw?: string | null): boolean {
-  return isGeminiLivePipeline(raw);
+  void normalizeVoicePipeline(_agentVoicePipeline);
+  return 'gemini_live';
 }

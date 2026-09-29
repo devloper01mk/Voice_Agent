@@ -85,7 +85,7 @@ export default function SimulatorSetupForm({
           {agentId && selected && (
             <p className="studio-field-hint">
               Voice pipeline from Agent Studio:{' '}
-              <strong>{(selected.voicePipeline ?? 'cascaded').replace(/_/g, ' ')}</strong>
+              <strong>{(selected.voicePipeline ?? 'gemini_live').replace(/_/g, ' ')}</strong>
               {selected.realtimeVoice ? ` · ${selected.realtimeVoice}` : ''}. Change it under Studio
               → Voice.
             </p>

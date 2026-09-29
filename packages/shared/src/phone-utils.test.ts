@@ -33,6 +33,10 @@ describe('formatPhoneForSpeech', () => {
       formatPhoneForSpeech('9876543210'),
       'nine eight, seven six, five four, three two, one zero',
     );
+    assert.equal(
+      formatPhoneForSpeech('9672222356'),
+      'nine six, seven two, two two, two three, five six',
+    );
   });
 
   it('formats as Hindi digit words when locale is hi', () => {

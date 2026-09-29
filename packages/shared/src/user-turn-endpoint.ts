@@ -70,7 +70,7 @@ function contentWords(text: string): string[] {
 
 /**
  * True when incoming is basically the same ask as committed (prefix/subset/high
- * word overlap) — used to stop Sarvam re-firing the same question as a new turn.
+ * word overlap) — used to stop STT re-firing the same question as a new turn.
  */
 export function isNearDuplicateUtterance(
   committed: string,

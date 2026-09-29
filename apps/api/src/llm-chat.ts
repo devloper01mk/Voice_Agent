@@ -69,21 +69,18 @@ export async function callChatApi({
 }
 
 export async function callLlmJson<T>(opts: {
-  llmProvider: 'groq' | 'gpt';
+  llmProvider?: 'gpt';
   llmModel: string;
   system: string;
   user: string;
   maxTokens?: number;
 }): Promise<T> {
-  const isGroq = opts.llmProvider === 'groq';
   const raw = await callChatApi({
-    url: isGroq
-      ? 'https://api.groq.com/openai/v1/chat/completions'
-      : 'https://api.openai.com/v1/chat/completions',
-    apiKey: isGroq ? process.env.GROQ_API_KEY : process.env.OPENAI_API_KEY,
+    url: 'https://api.openai.com/v1/chat/completions',
+    apiKey: process.env.OPENAI_API_KEY,
     model: opts.llmModel,
     maxTokens: opts.maxTokens ?? 800,
-    providerLabel: isGroq ? 'Groq' : 'OpenAI',
+    providerLabel: 'OpenAI',
     messages: [
       { role: 'system', content: opts.system },
       { role: 'user', content: opts.user },

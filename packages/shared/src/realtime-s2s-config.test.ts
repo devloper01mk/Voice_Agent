@@ -6,28 +6,30 @@ import {
   normalizeRealtimeS2sUserConfig,
   realtimeS2sUserConfigToSessionConfig,
 } from './realtime-s2s-config.js';
+import { DEFAULT_GEMINI_LIVE_MODEL, DEFAULT_GEMINI_LIVE_VOICE } from './gemini-live-config.js';
 
 describe('realtime-s2s-config', () => {
-  it('defaults match screenshot preset', () => {
+  it('defaults match Gemini Live preset', () => {
     const config = defaultRealtimeS2sUserConfig();
-    assert.equal(config.model, 'gpt-realtime-mini');
-    assert.equal(config.transcriptionModel, 'gpt-realtime-whisper');
-    assert.equal(config.voice, 'coral');
+    assert.equal(config.model, DEFAULT_GEMINI_LIVE_MODEL);
+    assert.equal(config.provider, 'gemini');
+    assert.equal(config.voice, DEFAULT_GEMINI_LIVE_VOICE);
     assert.equal(config.turnDetectionThreshold, 0.5);
-    assert.equal(config.turnDetectionSilenceDurationMs, 500);
+    assert.equal(config.turnDetectionSilenceDurationMs, 200);
   });
 
-  it('normalizes partial user config', () => {
+  it('normalizes partial user config and maps legacy OpenAI models to Gemini', () => {
     const config = normalizeRealtimeS2sUserConfig({
       model: 'gpt-realtime',
-      voice: 'coral',
+      voice: 'Kore',
       turnDetectionMode: 'semantic',
       turnDetectionEagerness: 'high',
     });
-    assert.equal(config.model, 'gpt-realtime');
-    assert.equal(config.voice, 'coral');
+    assert.equal(config.model, DEFAULT_GEMINI_LIVE_MODEL);
+    assert.equal(config.voice, 'Kore');
     assert.equal(config.turnDetectionMode, 'semantic');
     assert.equal(config.turnDetectionEagerness, 'high');
+    assert.equal(config.provider, 'gemini');
   });
 
   it('builds session config from user settings', () => {

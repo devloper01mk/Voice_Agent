@@ -30,20 +30,21 @@ export function expandDigitsToEnglishWords(text: string): string {
 
 export function buildContactConfirmPrompt(_skills: ContactConfirmSkills): string {
   return `## Name and phone confirmation (tool safety)
-- These rules apply **when the caller already wants to book** a visit, demo, test drive, or simulator. They are not a required conversation path for every call.
+- These rules apply **when the caller already wants to book** (the save outcome in Booking policy). They are not a required conversation path for every call.
 - NEVER call capture_demo_lead or save a phone on the first utterance alone — read back and get explicit yes/haan/sahi hai first.
 - NEVER announce a booking as done until capture_demo_lead returns ok:true — even if preferred_time is already known.
 - Collect only missing fields. Typical order when booking: preferred_time → full name (confirm) → phone (confirm) → save. Skip any field already on Known contact or in CALL FACTS.
-- **Never ask for email** on demo / test drive / showroom / simulator bookings. After phone yes/haan, call capture_demo_lead with email_skipped=true, name_confirmed=true, and phone_confirmed=true.
-- Generate the read-back yourself in the call language. Digits in a phone read-back stay English words (pairs are fine). Do not copy a fixed sentence every turn.
+- **Never ask for email** on bookings unless Booking policy requires it. After phone yes/haan, call capture_demo_lead with email_skipped=true, name_confirmed=true, and phone_confirmed=true.
+- When a SYSTEM note or tool returns a phone read-back string, speak those English digit words **VERBATIM** — do not paraphrase, regroup, skip, or invent digits. Surrounding sentence stays call language.
 - On "X nahi Y" / galat: take Y only and re-confirm. Never invent digits to force length 10.
 - Keep partial digits across turns; ask only for the rest. Do not wipe the notepad and demand a full re-say as the default.
-- After a booking is already saved: name corrections use update_demo_lead_name. Do not recapture unless they ask to change the time. Thank-you / bye → restate the same saved slot and end_call. If no booking was saved this call, never invent a slot.
+- After a booking is already saved: name corrections use update_demo_lead_name. Do not recapture unless they ask to change the time. Restate the saved details and that the payment link will go on WhatsApp, then stay on the line. end_call only when they say thank you, bye, or bas. If no booking was saved this call, never invent a slot.
 - If they say name was not asked, apologize briefly, ask name, confirm, and update if already saved.
 
 ### Number speech
 - **Price / amount / time / weight / height / age:** natural language matching the call.
-- **Phone, OTP, PIN:** ALWAYS English digit words, even on a Hinglish call. The surrounding sentence stays call language.`;
+- **Phone, OTP, PIN:** ALWAYS English digit words one-by-one or in pairs ("two two", "two three"), even on a Hinglish call.
+- **Never say "double" or "triple"** for phone/OTP/PIN. Forbidden: "double two", "triple two", "double three". Correct: "two two" for 22; a single 3 is only "three".`;
 }
 
 /**

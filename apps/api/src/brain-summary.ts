@@ -47,20 +47,6 @@ export async function summarizeProductKnowledge(opts: SummarizeBrainOptions): Pr
   const userContent = buildUserContent(opts.productName, opts.brainMarkdown);
   const maxTokens = maxSummaryTokens(opts.brainMarkdown);
 
-  if (opts.llmProvider === 'groq') {
-    return callChatApi({
-      url: 'https://api.groq.com/openai/v1/chat/completions',
-      apiKey: process.env.GROQ_API_KEY,
-      model: opts.llmModel || process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
-      messages: [
-        { role: 'system', content: SUMMARY_SYSTEM },
-        { role: 'user', content: userContent },
-      ],
-      maxTokens,
-      providerLabel: 'Groq',
-    });
-  }
-
   return callChatApi({
     url: 'https://api.openai.com/v1/chat/completions',
     apiKey: process.env.OPENAI_API_KEY,

@@ -29,7 +29,7 @@ const DISCUSS_OPTIONS: { id: BookingDiscussGate; label: string }[] = [
 
 const OUTCOME_OPTIONS: { id: BookingOutcome; label: string }[] = [
   { id: 'demo', label: 'Demo' },
-  { id: 'visit', label: 'Visit / test drive' },
+  { id: 'visit', label: 'Visit / appointment' },
   { id: 'stay', label: 'Stay / hotel booking' },
   { id: 'callback', label: 'Callback' },
   { id: 'lead_only', label: 'Lead only' },
@@ -225,6 +225,9 @@ export function BookingPolicyPanel({
                 {o.label}
               </option>
             ))}
+            {!LOCATION_OPTIONS.some((o) => o.id === booking.locationType) && (
+              <option value={booking.locationType}>{booking.locationType} (from playbook)</option>
+            )}
           </select>
         </div>
 

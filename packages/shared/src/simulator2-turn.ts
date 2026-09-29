@@ -12,13 +12,7 @@ import {
   buildHinglishGenderCorrectionNote,
   spokenUsesWrongHinglishGender,
 } from './hinglish-gender.js';
-import {
-  textMentionsKnownHotelCity,
-  extractKnownHotelCityFromText,
-  isNexoraHotelFactsConfigured,
-  queryNexoraHotelFacts,
-  compactHotelFactsForLlm,
-} from './nexora-hotel-facts.js';
+import { resolvePackForBooking } from './packs/index.js';
 import {
   emptyCallFacts,
   mergeCallFacts,
@@ -84,7 +78,6 @@ import {
 } from './phone-buffer.js';
 import { looksLikePhoneDigitUtterance, shouldRunPhoneProtocol } from './phone-protocol.js';
 import type { SkillsConfig } from './skills-types.js';
-import { mergeBookingPolicy } from './booking-policy.js';
 import { correctTranscriptForLlm, shouldConfirmUnclearStt, sttClarifyLine } from './transcript-correction.js';
 import type { CallDirection } from './known-contact.js';
 import {
@@ -104,11 +97,44 @@ import {
   type ConversationFeelState,
 } from './simulator2-conversation-feel.js';
 
-const BOOKING_CONFIRMED_RE =
-  /\b(confirm ho gay(?:a|i)|confirm(?:ed)?|booking confirm|slot confirm|visit confirm|book ho gay(?:a|i)|lock kar diya|aapki booking confirm|booking confirm ho)\b/i;
+/**
+ * Claims the booking/slot is *already* done. Deliberately excludes bare "confirm" /
+ * "please confirm" / "confirm karna" — those are intake questions, not false saves.
+ */
+const BOOKING_ALREADY_CONFIRMED_RE =
+  /\b(?:confirm\s+ho\s+gay(?:a|i)|(?:aapki\s+)?booking\s+(?:is\s+)?confirm(?:ed)?(?:\s+ho(?:\s+gay(?:a|i))?)?|slot\s+(?:is\s+)?confirm(?:ed)?(?:\s+ho(?:\s+gay(?:a|i))?)?|visit\s+(?:is\s+)?confirm(?:ed)?(?:\s+ho(?:\s+gay(?:a|i))?)?|book\s+ho\s+gay(?:a|i)|lock\s+kar\s+diya|already\s+booked|slot\s+(?:is\s+)?lock(?:ed)?)\b/i;
+
+/** Asking the caller to verify a detail — must never trigger the fake-booking guard. */
+const ASK_CALLER_TO_CONFIRM_RE =
+  /\bplease\s+confirm\b|\bconfirm\s+(?:kar(?:na|o|e|iye|ungi|unga)?|so\s+i|ki?\s*jiye)\b|\bis\s+it\b[\s\S]{0,60}\bconfirm\b/i;
+
+/** Our own correction / "not saved yet" speech — must never re-trigger. */
+const BOOKING_PENDING_SELF_RE =
+  /save pending|save nahi hui|abhi tak save|not\s+(?:yet\s+)?saved|pending hai/i;
+
+/** True when spoken text claims a booking/slot is already confirmed. */
+export function looksLikeBookingConfirmedClaim(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  if (ASK_CALLER_TO_CONFIRM_RE.test(t)) return false;
+  if (BOOKING_PENDING_SELF_RE.test(t)) return false;
+  return BOOKING_ALREADY_CONFIRMED_RE.test(t);
+}
 
 function looksLikeBookingConfirmed(text: string): boolean {
-  return BOOKING_CONFIRMED_RE.test(text);
+  return looksLikeBookingConfirmedClaim(text);
+}
+
+/** Spoken correction — no "confirm" word so the session guard cannot loop on itself. */
+export const FAKE_BOOKING_CORRECTION_LINE =
+  'Abhi booking save pending hai — abhi tak save nahi hui. Jo detail missing hai wo bataiye.';
+
+/** Same correction in English so an English-locked call does not flip accent mid-sentence. */
+export const FAKE_BOOKING_CORRECTION_LINE_EN =
+  'The booking is not saved yet. Tell me the one detail that is still missing.';
+
+export function fakeBookingCorrectionLine(language: 'en' | 'hinglish' | null | undefined): string {
+  return language === 'en' ? FAKE_BOOKING_CORRECTION_LINE_EN : FAKE_BOOKING_CORRECTION_LINE;
 }
 
 function buildFakeBookingConfirmSystemNote(): string {
@@ -119,87 +145,20 @@ function buildFakeBookingConfirmSystemNote(): string {
   );
 }
 
+/** Product-agnostic "what / which / where / available" ask — pack hooks may handle it first. */
 function isProductCatalogHelpAsk(text: string): boolean {
-  return (
-    /\b(room|rooms|floor|floors|suite|suites|deluxe|standard|amenit(?:y|ies)|property|properties|hotel|hotels|hostel|resort|location|located|kahan|kahaan|kaunsa|kaunse|which\s+hotel|kitne\s+floor|particular\s+floor|city\s*(?:center|centre)|paas|nearby|availability|available|beach|beaches|sea\s*side|pahad|pahaad|hills?|hill\s*station|mountains?|samundar|jungle|trip|trek)\b|कमरे?|फ्लोर|होटल|हॉस्टल|रिज़?ॉर्ट|लोकेशन|कौन\s*स[ेा]|कहाँ|कितने\s*फ्लोर|उपलब्ध|पहाड़|बीच|समुंदर|समुद्र|हिल|जंगल|ट्रिप/i.test(
-      text,
-    )
-  );
-}
-
-/** Named stay city / "X mein hotel?" — must live-lookup every time, not brain alone. */
-function isCityHotelExistenceAsk(text: string): boolean {
-  const t = text.trim();
-  if (!t) return false;
-  // Any known city (Latin or Devanagari) → always force live lookup this turn
-  if (textMentionsKnownHotelCity(t)) return true;
-  // Brand cue: "X mein Moustache hai?" — existence ask even without hotel/property word
-  if (
-    /(?:\b(?:moustache|mustache|mustach)\b|मस्टैच|मुस्टैच|मुस्टाच|मस्टाच).{0,30}(?:\bhai\b|है|\bkya\b|क्या|available|\bthere\b)/i.test(
-      t,
-    )
-  ) {
-    return true;
-  }
-  // Generic: place + hotel/property/stay ask
-  if (
-    /\b(mein|me|in|at|par)\b.{0,40}\b(hotel|hostel|property|properties|stay|resort|branch)\b|\b(hotel|hostel|property|properties|stay|resort)\b.{0,40}\b(mein|me|in|at|hai\s*kya|available|kahan|kahaan|exact)\b/i.test(
-      t,
-    )
-  ) {
-    return true;
-  }
-  if (
-    /\b(hotel|hostel|property|stay).{0,24}(hai\s*kya|available|dekha|dekh\s*raha|dekh\s*rahi|exact)|होटल.{0,20}(है\s*क्या|कहाँ|उपलब्ध)|में\s*(है|नहीं)|exact\s*(hai|nahi)|एग्जैक्ट|exact/i.test(
-      t,
-    )
-  ) {
-    return true;
-  }
-  return false;
-}
-
-function buildCityHotelLookupNote(productName: string): string {
-  return (
-    `[SYSTEM: Caller named or asked about a clear city for ${productName}. ` +
-    `You MUST check BOTH: (1) Product Knowledge for sales vibe/policies, (2) lookup_hotel_availability for existence + live rooms/prices. ` +
-    `Call lookup_hotel_availability NOW with **city in English** (मनाली→Manali, आगरा→Agra, ऋषिकेश→Rishikesh). ` +
-    `Every new city this call = a NEW tool call — never reuse a previous city answer. ` +
-    `Speak after both sources: live JSON decides existence/rates; Brain may add warm sales context that does NOT contradict live. ` +
-    `Do NOT say "nahi hai" / "property nahi" until ok:false WITHOUT fallback_to_brain. ` +
-    `If fallback_to_brain:true, never deny the city; offer retry. ` +
-    `If the place was vague (landmark/area/not a city), do NOT call yet — acknowledge, confirm nearest city or offer 2–3 choices, then lookup.]`
-  );
-}
-
-function buildPrefetchedCityLookupNote(
-  productName: string,
-  city: string,
-  compact: Record<string, unknown>,
-): string {
-  const payload = JSON.stringify(compact);
-  return (
-    `[SYSTEM: LIVE LOOKUP already completed for ${city} (${productName}). Result JSON: ${payload}. ` +
-    `Answer NOW using BOTH: this live JSON + Product Knowledge. ` +
-    `Existence / rooms / prices / "hai ya nahi" → ONLY from this JSON. ` +
-    `Sales tone, vibe, policies → Product Knowledge OK if they do not contradict live. ` +
-    `If ok:true → property EXISTS; never say nahi hai. Speak from say/rooms (ask property if multi). ` +
-    `If fallback_to_brain:true → never deny; say live check failed and offer retry. ` +
-    `If ok:false without fallback → honest no live match + offer other cities. ` +
-    `Do NOT invent Suite/rates. You may skip calling lookup again for ${city} this turn.]`
+  return /\b(options?|offerings?|variants?|models?|plans?|packages?|types?|location|located|kahan|kahaan|kaunsa|kaunse|kaun\s*sa|which|nearby|paas|availability|available|details?|facilit(?:y|ies)|amenit(?:y|ies))\b|लोकेशन|कौन\s*स[ेा]|कहाँ|उपलब्ध|सुविधा/i.test(
+    text,
   );
 }
 
 function buildProductCatalogHelpFirstNote(productName: string): string {
   return (
     `[SYSTEM: Caller asked a product / catalog question about ${productName}. ` +
-    `If they named a clear city (Hindi or English), you MUST call lookup_hotel_availability with English city first — every city, every time. ` +
-    `If the place is vague (landmark/area/"pahad"/unclear), do NOT invent a city or rates — acknowledge, map to nearest city or offer 2–3 city choices, then lookup after they pick. ` +
-    `Otherwise answer from Product Knowledge without inventing a destination city. ` +
-    `Do NOT volunteer a destination city the caller has not named yet (except short clarify choices). ` +
+    `Answer from Product Knowledge now — if the detail is not visible there, call search_product_knowledge silently first. ` +
     `Do NOT ask for name, phone, WhatsApp, or payment acknowledgment before answering. ` +
     `Do NOT deflect with "pehle details chahiye". Do NOT pitch booking / "details collect" this turn. ` +
-    `One short useful answer from Brain; intake only after they clearly want to book.]`
+    `One short useful answer; intake only after they clearly want to book.]`
   );
 }
 
@@ -713,25 +672,16 @@ export async function prepareSimulator2UserTurn(input: {
     baseForLock = `${baseForLock}\n\n${buildAngryCallerSystemNote(angry.acknowledge, angry.deescalate)}`;
   }
 
-  if (
-    mergeBookingPolicy(input.skills.booking).outcome === 'stay' &&
-    isCityHotelExistenceAsk(textForLlm) &&
-    !isAnswerFirstComplaint(textForLlm)
-  ) {
-    const city = extractKnownHotelCityFromText(textForLlm);
-    if (city && isNexoraHotelFactsConfigured()) {
-      try {
-        const live = await queryNexoraHotelFacts(city, {
-          signal: AbortSignal.timeout(2_500),
-        });
-        const compact = compactHotelFactsForLlm(live);
-        baseForLock = `${baseForLock}\n\n${buildPrefetchedCityLookupNote(input.productName, city, compact)}`;
-      } catch {
-        baseForLock = `${baseForLock}\n\n${buildCityHotelLookupNote(input.productName)}`;
-      }
-    } else {
-      baseForLock = `${baseForLock}\n\n${buildCityHotelLookupNote(input.productName)}`;
-    }
+  const pack = resolvePackForBooking(input.skills.booking);
+  const packNote = pack.turnNote
+    ? await pack.turnNote({
+        text: textForLlm,
+        productName: input.productName,
+        answerFirst: isAnswerFirstComplaint(textForLlm),
+      })
+    : null;
+  if (packNote) {
+    baseForLock = `${baseForLock}\n\n${packNote}`;
   } else if (isProductCatalogHelpAsk(textForLlm)) {
     baseForLock = `${baseForLock}\n\n${buildProductCatalogHelpFirstNote(input.productName)}`;
   }

@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import {
   buildCallCompletedPayload,
   inferCallSentiment,
+  inferCallSentimentArc,
   resolveCallDisposition,
   resolveCallIntent,
 } from './call-webhook.js';
@@ -63,6 +64,46 @@ describe('inferCallSentiment', () => {
       }),
       'negative',
     );
+  });
+
+  it('returns negative for Hindi withdraw / wrong-number friction', () => {
+    assert.equal(
+      inferCallSentiment({
+        lines: [
+          { id: '1', role: 'user', text: 'गलत है', timestamp: 1 },
+          { id: '2', role: 'user', text: 'जी नहीं, रहने दीजिए।', timestamp: 2 },
+        ],
+      }),
+      'negative',
+    );
+  });
+});
+
+describe('inferCallSentimentArc', () => {
+  it('builds a dynamic arc from observed moods only', () => {
+    const arc = inferCallSentimentArc({
+      lines: [
+        { id: '1', role: 'user', text: 'हेलो।', timestamp: 1 },
+        { id: '2', role: 'user', text: 'आगरा में घूमने की जगह बताओ', timestamp: 2 },
+        { id: '3', role: 'user', text: 'यहां पर स्टार्ट कर दीजिए।', timestamp: 3 },
+        { id: '4', role: 'user', text: 'गलत है।', timestamp: 4 },
+        { id: '5', role: 'user', text: 'जी नहीं, रहने दीजिए।', timestamp: 5 },
+        { id: '6', role: 'user', text: 'बाय।', timestamp: 6 },
+      ],
+    });
+    assert.match(arc, /curious/);
+    assert.match(arc, /interested|booking intent/);
+    assert.match(arc, /frustrated \(phone\)/);
+    assert.match(arc, /not interested|polite exit/);
+    assert.doesNotMatch(arc, /^(positive|neutral|negative)$/);
+  });
+
+  it('does not invent phases that never appeared', () => {
+    const arc = inferCallSentimentArc({
+      lines: [{ id: '1', role: 'user', text: 'Haan book kar do', timestamp: 1 }],
+    });
+    assert.equal(arc, 'booking intent');
+    assert.doesNotMatch(arc, /curious|frustrated|polite exit/);
   });
 });
 
@@ -128,6 +169,8 @@ describe('buildCallCompletedPayload', () => {
     assert.equal(payload.user_status.wanted_to_book, true);
     assert.equal(payload.user_status.intent, 'booked');
     assert.equal(payload.user_status.goals_met, true);
+    assert.equal(payload.user_status.sentiment, 'positive');
+    assert.equal(payload.post_call_analysis.sentiment, 'booking intent');
     assert.equal(payload.contact.name, 'Ramesh');
     assert.ok(payload.booking);
     assert.equal(payload.booking?.city, 'Rishikesh');

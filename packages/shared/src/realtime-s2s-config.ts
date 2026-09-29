@@ -2,18 +2,17 @@ import {
   DEFAULT_GEMINI_LIVE_LANGUAGE,
   DEFAULT_GEMINI_LIVE_MODEL,
   DEFAULT_GEMINI_LIVE_VOICE,
-  GEMINI_LIVE_LANGUAGE_OPTIONS,
-  GEMINI_LIVE_MODEL_OPTIONS,
   estimateGeminiLiveCostInr,
   resolveGeminiLiveLanguageCode,
   resolveGeminiLiveModel,
   resolveGeminiLiveVoice,
 } from './gemini-live-config.js';
-import { isGeminiLivePipeline, resolveRealtimeVoice, type VoicePipeline } from './voice-pipeline.js';
+import type { VoicePipeline } from './voice-pipeline.js';
 
-export type S2sProvider = 'openai' | 'gemini';
+/** Sole S2S provider after Cascade / OpenAI Realtime removal. */
+export type S2sProvider = 'gemini';
 
-/** Simulator 2.0 → Force OpenAI Realtime S2S session preset id (legacy metadata). */
+/** Simulator 2.0 → Force S2S session preset id (legacy metadata). */
 export const SIMULATOR_FORCE_S2S_PRESET_ID = 'simulator_force_s2s' as const;
 
 export type RealtimeS2sPresetId = typeof SIMULATOR_FORCE_S2S_PRESET_ID;
@@ -23,12 +22,13 @@ export type RealtimeS2sTurnMode = 'normal' | 'semantic';
 export type RealtimeS2sEagerness = 'auto' | 'low' | 'medium' | 'high';
 export type RealtimeS2sMaxTokensMode = 'unlimited' | 'custom';
 
-/** User-editable Realtime S2S settings from Simulator 2.0. */
+/** User-editable Gemini Live S2S settings. */
 export interface RealtimeS2sUserConfig {
   provider: S2sProvider;
   model: string;
-  /** Gemini Live BCP-47 language (e.g. hi-IN). Ignored for OpenAI. */
+  /** Gemini Live BCP-47 language (e.g. hi-IN). */
   languageCode: string;
+  /** @deprecated Unused for Gemini — kept for DB compatibility. */
   transcriptionModel: string;
   maxTokensMode: RealtimeS2sMaxTokensMode;
   maxTokensCustom: number;
@@ -56,7 +56,7 @@ export interface RealtimeS2sSessionConfig {
   source: 'simulator_force_s2s' | 'studio_default';
   presetId?: RealtimeS2sPresetId;
   provider: S2sProvider;
-  pipeline: 'openai_realtime' | 'gemini_live';
+  pipeline: 'gemini_live';
   model: string;
   languageCode?: string;
   transcriptionModel: string;
@@ -69,13 +69,10 @@ export interface RealtimeS2sSessionConfig {
   estimatedCostInrPerMin?: string;
 }
 
-export const REALTIME_S2S_MODEL_OPTIONS = [
-  { value: 'gpt-realtime-mini', label: 'GPT Realtime Mini', hint: 'Budget ~₹2–3.5/min' },
-  { value: 'gpt-realtime', label: 'GPT Realtime', hint: 'Balanced quality' },
-  { value: 'gpt-realtime-2.1-mini', label: 'GPT Realtime 2.1 Mini', hint: 'Newer mini' },
-  { value: 'gpt-realtime-2.1', label: 'GPT Realtime 2.1', hint: 'Best quality' },
-] as const;
+/** @deprecated OpenAI Realtime models — unused after removal. */
+export const REALTIME_S2S_MODEL_OPTIONS = [] as const;
 
+/** @deprecated */
 export const REALTIME_S2S_TRANSCRIPTION_OPTIONS = [
   { value: 'gpt-realtime-whisper', label: 'GPT Realtime Whisper', hint: 'Realtime path' },
   { value: 'gpt-4o-mini-transcribe', label: 'GPT-4o Mini Transcribe', hint: 'Cheapest' },
@@ -104,36 +101,29 @@ export const REALTIME_S2S_EAGERNESS_OPTIONS = [
 export const REALTIME_S2S_TRANSCRIPTION_PROMPT =
   'Indian sales call in Hindi English Hinglish code-mix. Automotive, pricing, demo, callback.';
 
+const LEGACY_TRANSCRIPTION = 'gpt-realtime-whisper';
+
 export const SIMULATOR_FORCE_S2S_REALTIME = {
-  model: 'gpt-realtime-mini',
-  transcriptionModel: 'gpt-realtime-whisper',
+  model: DEFAULT_GEMINI_LIVE_MODEL,
+  transcriptionModel: LEGACY_TRANSCRIPTION,
   maxTokensMode: 'unlimited' as const,
   maxTokensCustom: 800,
-  voice: 'coral',
-  noiseReduction: 'far_field' as const,
+  voice: DEFAULT_GEMINI_LIVE_VOICE,
+  noiseReduction: 'off' as const,
   turnDetectionMode: 'normal' as const,
   turnDetectionThreshold: 0.5,
-  turnDetectionPrefixPaddingMs: 300,
-  turnDetectionSilenceDurationMs: 500,
+  turnDetectionPrefixPaddingMs: 100,
+  turnDetectionSilenceDurationMs: 200,
   turnDetectionEagerness: 'medium' as const,
   idleTimeoutEnabled: false,
-  estimatedCostInrPerMin: '₹2–3.5',
+  estimatedCostInrPerMin: estimateGeminiLiveCostInr(DEFAULT_GEMINI_LIVE_MODEL),
 } as const;
 
-const OPENAI_MODEL_VALUES = new Set<string>(REALTIME_S2S_MODEL_OPTIONS.map((o) => o.value));
-const GEMINI_MODEL_VALUES = new Set<string>(GEMINI_LIVE_MODEL_OPTIONS.map((o) => o.value));
-const TRANSCRIPTION_VALUES = new Set<string>(REALTIME_S2S_TRANSCRIPTION_OPTIONS.map((o) => o.value));
-
 export function resolveS2sProvider(
-  raw?: Partial<RealtimeS2sUserConfig> | null,
-  pipeline?: VoicePipeline | null,
+  _raw?: Partial<RealtimeS2sUserConfig> | null,
+  _pipeline?: VoicePipeline | null,
 ): S2sProvider {
-  if (pipeline === 'gemini_live') return 'gemini';
-  if (pipeline === 'openai_realtime') return 'openai';
-  if (raw?.provider === 'gemini') return 'gemini';
-  if (raw?.provider === 'openai') return 'openai';
-  if (typeof raw?.model === 'string' && GEMINI_MODEL_VALUES.has(raw.model)) return 'gemini';
-  return 'openai';
+  return 'gemini';
 }
 
 export function defaultGeminiLiveS2sUserConfig(): RealtimeS2sUserConfig {
@@ -141,14 +131,13 @@ export function defaultGeminiLiveS2sUserConfig(): RealtimeS2sUserConfig {
     provider: 'gemini',
     model: DEFAULT_GEMINI_LIVE_MODEL,
     languageCode: DEFAULT_GEMINI_LIVE_LANGUAGE,
-    transcriptionModel: SIMULATOR_FORCE_S2S_REALTIME.transcriptionModel,
+    transcriptionModel: LEGACY_TRANSCRIPTION,
     maxTokensMode: 'unlimited',
     maxTokensCustom: SIMULATOR_FORCE_S2S_REALTIME.maxTokensCustom,
     voice: DEFAULT_GEMINI_LIVE_VOICE,
     noiseReduction: 'off',
     turnDetectionMode: 'normal',
     turnDetectionThreshold: 0.5,
-    // Phone/Live latency: short end-of-utterance wait (phone clamps further for 2.5).
     turnDetectionPrefixPaddingMs: 100,
     turnDetectionSilenceDurationMs: 200,
     turnDetectionEagerness: 'medium',
@@ -156,24 +145,8 @@ export function defaultGeminiLiveS2sUserConfig(): RealtimeS2sUserConfig {
   };
 }
 
-export function defaultRealtimeS2sUserConfig(provider: S2sProvider = 'openai'): RealtimeS2sUserConfig {
-  if (provider === 'gemini') return defaultGeminiLiveS2sUserConfig();
-  return {
-    provider: 'openai',
-    model: SIMULATOR_FORCE_S2S_REALTIME.model,
-    languageCode: DEFAULT_GEMINI_LIVE_LANGUAGE,
-    transcriptionModel: SIMULATOR_FORCE_S2S_REALTIME.transcriptionModel,
-    maxTokensMode: SIMULATOR_FORCE_S2S_REALTIME.maxTokensMode,
-    maxTokensCustom: SIMULATOR_FORCE_S2S_REALTIME.maxTokensCustom,
-    voice: SIMULATOR_FORCE_S2S_REALTIME.voice,
-    noiseReduction: SIMULATOR_FORCE_S2S_REALTIME.noiseReduction,
-    turnDetectionMode: SIMULATOR_FORCE_S2S_REALTIME.turnDetectionMode,
-    turnDetectionThreshold: SIMULATOR_FORCE_S2S_REALTIME.turnDetectionThreshold,
-    turnDetectionPrefixPaddingMs: SIMULATOR_FORCE_S2S_REALTIME.turnDetectionPrefixPaddingMs,
-    turnDetectionSilenceDurationMs: SIMULATOR_FORCE_S2S_REALTIME.turnDetectionSilenceDurationMs,
-    turnDetectionEagerness: SIMULATOR_FORCE_S2S_REALTIME.turnDetectionEagerness,
-    idleTimeoutEnabled: SIMULATOR_FORCE_S2S_REALTIME.idleTimeoutEnabled,
-  };
+export function defaultRealtimeS2sUserConfig(_provider: S2sProvider = 'gemini'): RealtimeS2sUserConfig {
+  return defaultGeminiLiveS2sUserConfig();
 }
 
 function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
@@ -184,41 +157,27 @@ function clampNumber(value: unknown, min: number, max: number, fallback: number)
 
 export function normalizeRealtimeS2sUserConfig(
   raw?: Partial<RealtimeS2sUserConfig> | null,
-  pipeline?: VoicePipeline | null,
+  _pipeline?: VoicePipeline | null,
 ): RealtimeS2sUserConfig {
-  const provider = resolveS2sProvider(raw, pipeline);
-  const defaults =
-    provider === 'gemini' ? defaultGeminiLiveS2sUserConfig() : defaultRealtimeS2sUserConfig();
-  const modelValues = provider === 'gemini' ? GEMINI_MODEL_VALUES : OPENAI_MODEL_VALUES;
+  const defaults = defaultGeminiLiveS2sUserConfig();
   const model =
-    typeof raw?.model === 'string'
-      ? provider === 'gemini'
-        ? resolveGeminiLiveModel(raw.model)
-        : modelValues.has(raw.model)
-          ? raw.model
-          : defaults.model
-      : defaults.model;
-  const transcriptionModel =
-    typeof raw?.transcriptionModel === 'string' && TRANSCRIPTION_VALUES.has(raw.transcriptionModel)
-      ? raw.transcriptionModel
-      : defaults.transcriptionModel;
-  const voice =
-    provider === 'gemini'
-      ? resolveGeminiLiveVoice(raw?.voice ?? defaults.voice)
-      : resolveRealtimeVoice(raw?.voice ?? defaults.voice);
+    typeof raw?.model === 'string' ? resolveGeminiLiveModel(raw.model) : defaults.model;
+  const voice = resolveGeminiLiveVoice(raw?.voice ?? defaults.voice);
 
   return {
-    provider,
+    provider: 'gemini',
     model,
     languageCode: resolveGeminiLiveLanguageCode(raw?.languageCode ?? defaults.languageCode),
-    transcriptionModel,
+    transcriptionModel: defaults.transcriptionModel,
     maxTokensMode: raw?.maxTokensMode === 'custom' ? 'custom' : 'unlimited',
     maxTokensCustom: clampNumber(raw?.maxTokensCustom, 64, 16_384, defaults.maxTokensCustom),
     voice,
     noiseReduction:
-      raw?.noiseReduction === 'near_field' || raw?.noiseReduction === 'off'
+      raw?.noiseReduction === 'near_field' ||
+      raw?.noiseReduction === 'far_field' ||
+      raw?.noiseReduction === 'off'
         ? raw.noiseReduction
-        : 'far_field',
+        : defaults.noiseReduction,
     turnDetectionMode: raw?.turnDetectionMode === 'semantic' ? 'semantic' : 'normal',
     turnDetectionThreshold: clampNumber(raw?.turnDetectionThreshold, 0, 1, defaults.turnDetectionThreshold),
     turnDetectionPrefixPaddingMs: clampNumber(
@@ -248,23 +207,14 @@ export function isRealtimeS2sPresetId(raw?: string | null): raw is RealtimeS2sPr
 }
 
 export function estimateRealtimeS2sCostInr(config: RealtimeS2sUserConfig): string {
-  if (config.provider === 'gemini') return estimateGeminiLiveCostInr(config.model);
-  if (config.model.includes('mini')) return '₹2–3.5';
-  if (config.model.includes('2.1')) return '₹5–8';
-  return '₹4–6';
+  return estimateGeminiLiveCostInr(config.model);
 }
 
 export function realtimeS2sUserConfigToSessionConfig(
   config: RealtimeS2sUserConfig,
   source: RealtimeS2sSessionConfig['source'] = 'simulator_force_s2s',
-  pipeline?: VoicePipeline | null,
+  _pipeline?: VoicePipeline | null,
 ): RealtimeS2sSessionConfig {
-  const resolvedPipeline: RealtimeS2sSessionConfig['pipeline'] =
-    pipeline === 'gemini_live' || pipeline === 'openai_realtime'
-      ? pipeline
-      : config.provider === 'gemini'
-        ? 'gemini_live'
-        : 'openai_realtime';
   const turnDetection: RealtimeS2sTurnDetectionConfig =
     config.turnDetectionMode === 'semantic'
       ? {
@@ -283,10 +233,10 @@ export function realtimeS2sUserConfigToSessionConfig(
   return {
     source,
     presetId: source === 'simulator_force_s2s' ? SIMULATOR_FORCE_S2S_PRESET_ID : undefined,
-    provider: config.provider,
-    pipeline: resolvedPipeline,
+    provider: 'gemini',
+    pipeline: 'gemini_live',
     model: config.model,
-    languageCode: config.provider === 'gemini' ? config.languageCode : undefined,
+    languageCode: config.languageCode,
     transcriptionModel: config.transcriptionModel,
     maxResponseOutputTokens:
       config.maxTokensMode === 'custom' ? config.maxTokensCustom : 'unlimited',
@@ -301,14 +251,7 @@ export function realtimeS2sUserConfigToSessionConfig(
 
 function buildStudioDefaultConfig(voice: string): RealtimeS2sSessionConfig {
   return realtimeS2sUserConfigToSessionConfig(
-    normalizeRealtimeS2sUserConfig({
-      model: 'gpt-realtime',
-      transcriptionModel: 'gpt-4o-mini-transcribe',
-      voice,
-      turnDetectionMode: 'semantic',
-      turnDetectionEagerness: 'medium',
-      noiseReduction: 'off',
-    }),
+    normalizeRealtimeS2sUserConfig({ voice }),
     'studio_default',
   );
 }
@@ -324,7 +267,7 @@ export function buildRealtimeS2sSessionConfig(
       normalizeRealtimeS2sUserConfig({ ...userConfig, voice: voice ?? userConfig.voice }),
     );
   }
-  const resolvedVoice = resolveRealtimeVoice(voice ?? SIMULATOR_FORCE_S2S_REALTIME.voice);
+  const resolvedVoice = resolveGeminiLiveVoice(voice ?? DEFAULT_GEMINI_LIVE_VOICE);
   if (isRealtimeS2sPresetId(presetId)) {
     return realtimeS2sUserConfigToSessionConfig(
       normalizeRealtimeS2sUserConfig({ voice: resolvedVoice }),

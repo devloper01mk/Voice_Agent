@@ -5,14 +5,6 @@ export const USD_TO_INR = 85;
 
 /** Published per-use rates (USD) — see vendor pricing pages; estimates only. */
 export const PUBLISHED_PRICING_USD = {
-  /** Azure Speech — standard real-time STT, ~$1.00 / audio hour */
-  azureSttPerAudioHour: 1.0,
-  /** Cartesia Sonic — ~$50 / 1M characters (pay-as-you-go tier) */
-  cartesiaPerMillionCharacters: 50,
-  groq: {
-    inputPerMillionTokens: 0.59,
-    outputPerMillionTokens: 0.79,
-  },
   gpt: {
     /** gpt-5.4-mini — phone / Simulator 2.0 default */
     inputPerMillionTokens: 0.75,
@@ -147,25 +139,19 @@ export function usageFromMetrics(metrics: {
   };
 }
 
-export function estimateCallCost(usage: CallUsage, llmProvider: LlmProvider = 'groq'): CostBreakdown {
-  const sttUsd =
-    (usage.sttAudioDurationMs / 3_600_000) * PUBLISHED_PRICING_USD.azureSttPerAudioHour;
+export function estimateCallCost(usage: CallUsage, _llmProvider: LlmProvider = 'gpt'): CostBreakdown {
+  // Cascaded STT/TTS removed — Gemini Live only. Keep LLM estimate for brain tooling.
+  const sttUsd = 0;
+  const ttsUsd = 0;
 
-  const llmRates =
-    llmProvider === 'gpt' ? PUBLISHED_PRICING_USD.gpt : PUBLISHED_PRICING_USD.groq;
+  const llmRates = PUBLISHED_PRICING_USD.gpt;
   const cached = Math.min(usage.llmCachedPromptTokens ?? 0, usage.llmPromptTokens);
   const uncached = Math.max(0, usage.llmPromptTokens - cached);
-  const cachedInputRate =
-    llmProvider === 'gpt'
-      ? PUBLISHED_PRICING_USD.gpt.cachedInputPerMillionTokens
-      : llmRates.inputPerMillionTokens;
+  const cachedInputRate = PUBLISHED_PRICING_USD.gpt.cachedInputPerMillionTokens;
   const llmUsd =
     (uncached / 1_000_000) * llmRates.inputPerMillionTokens +
     (cached / 1_000_000) * cachedInputRate +
     (usage.llmCompletionTokens / 1_000_000) * llmRates.outputPerMillionTokens;
-
-  const ttsUsd =
-    (usage.ttsCharacters / 1_000_000) * PUBLISHED_PRICING_USD.cartesiaPerMillionCharacters;
 
   const totalUsd = sttUsd + llmUsd + ttsUsd;
 
@@ -176,7 +162,7 @@ export function resolveS2sCostProvider(
   provider?: string | null,
   model?: string | null,
 ): S2sCostProvider {
-  if (provider === 'gemini' || model?.includes('gemini')) return 'gemini';
+  if (provider === 'gemini' || model?.includes('gemini') || !provider) return 'gemini';
   if (model?.includes('mini')) return 'openai_mini';
   return 'openai';
 }
@@ -209,7 +195,7 @@ export function s2sUsageFromMetrics(metrics: {
 
 export function estimateS2sCallCost(
   usage: S2sCallUsage,
-  provider: S2sCostProvider = 'openai',
+  provider: S2sCostProvider = 'gemini',
 ): S2sCostBreakdown {
   const rates =
     provider === 'gemini'

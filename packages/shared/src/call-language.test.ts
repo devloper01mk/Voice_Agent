@@ -51,6 +51,13 @@ describe('updateCallLanguageLock', () => {
     assert.equal(lock, 'en');
   });
 
+  it('locks Hinglish when the caller uses Hindi script', () => {
+    let lock = updateCallLanguageLock('मैं अक्टूबर में कहीं घूमने का प्लान बना रहा हूं।', null);
+    assert.equal(lock, 'hinglish');
+    lock = updateCallLanguageLock('available', lock);
+    assert.equal(lock, 'hinglish');
+  });
+
   it('switches back only on explicit Hindi request', () => {
     let lock = updateCallLanguageLock('talk in english', null);
     assert.equal(lock, 'en');

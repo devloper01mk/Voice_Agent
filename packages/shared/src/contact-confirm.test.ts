@@ -20,6 +20,14 @@ describe('spokenPhoneForReadBack', () => {
       'nine zero, seven eight, eight zero, two two, seven eight',
     );
   });
+
+  it('uses repeated digit words not double/triple for runs of twos', () => {
+    assert.equal(
+      spokenPhoneForReadBack('9672222356'),
+      'nine six, seven two, two two, two three, five six',
+    );
+    assert.doesNotMatch(spokenPhoneForReadBack('9672222356'), /double|triple/i);
+  });
 });
 
 describe('buildContactConfirmPrompt', () => {
@@ -28,6 +36,8 @@ describe('buildContactConfirmPrompt', () => {
     assert.match(prompt, /ALWAYS English digit words/i);
     assert.match(prompt, /Price \/ amount \/ time \/ weight \/ height \/ age/i);
     assert.match(prompt, /Phone, OTP, PIN/i);
+    assert.match(prompt, /Never say "double" or "triple"/i);
+    assert.match(prompt, /VERBATIM/i);
     assert.match(prompt, /Never ask for email/i);
     assert.match(prompt, /email_skipped=true/i);
     assert.match(prompt, /name_confirmed=true/i);

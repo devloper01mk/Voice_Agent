@@ -6,7 +6,6 @@ import {
   normalizeRealtimeS2sUserConfig,
   normalizeVoicePipeline,
   resolveGeminiLiveVoice,
-  resolveRealtimeVoice,
   type RealtimeS2sUserConfig,
 } from '@vsa/shared';
 import { prisma } from '../db.js';
@@ -28,8 +27,8 @@ simulator2LivekitRouter.post('/token', async (req, res) => {
     prospectName: z.string().optional(),
     contactPhone: z.string().optional(),
     contactEmail: z.string().optional(),
-    /** Simulator-only: override Studio pipeline for this session (cascaded | openai_realtime | gemini_live). */
-    voicePipeline: z.enum(['cascaded', 'openai_realtime', 'gemini_live']).optional(),
+    /** Simulator-only override — always normalized to gemini_live. */
+    voicePipeline: z.enum(['gemini_live']).optional(),
     realtimeVoice: z.string().max(40).optional(),
     /** Loosely validated — normalized via normalizeRealtimeS2sUserConfig below. */
     realtimeS2sConfig: z.record(z.string(), z.unknown()).optional(),
@@ -48,6 +47,12 @@ simulator2LivekitRouter.post('/token', async (req, res) => {
     return res.status(500).json({ error: 'LiveKit is not configured' });
   }
 
+  if (!process.env.GEMINI_API_KEY?.trim() && !process.env.GOOGLE_API_KEY?.trim()) {
+    return res.status(400).json({
+      error: 'GEMINI_API_KEY (or GOOGLE_API_KEY) is required for Gemini Live simulator calls.',
+    });
+  }
+
   const roomName = `call-v2-${agent.id}-${Date.now()}`;
   const participantName = parsed.data.participantName ?? 'user';
   const direction = parsed.data.direction;
@@ -58,44 +63,22 @@ simulator2LivekitRouter.post('/token', async (req, res) => {
   const voicePipeline = normalizeVoicePipeline(
     parsed.data.voicePipeline ?? agent.voicePipeline,
   );
-  const forceS2s =
-    parsed.data.voicePipeline === 'openai_realtime' ||
-    parsed.data.voicePipeline === 'gemini_live';
-  let realtimeS2sConfig: RealtimeS2sUserConfig | undefined;
-  if (voicePipeline === 'openai_realtime' || voicePipeline === 'gemini_live') {
-    if (forceS2s) {
-      // Simulator override — use request body config
-      realtimeS2sConfig = normalizeRealtimeS2sUserConfig(
-        (parsed.data.realtimeS2sConfig ?? {}) as Partial<RealtimeS2sUserConfig>,
-        voicePipeline,
-      );
-    } else {
-      // Use Agent Studio saved config (fixed per agent)
-      const fromAgent =
-        agent.realtimeS2sConfig && typeof agent.realtimeS2sConfig === 'object'
-          ? (agent.realtimeS2sConfig as Partial<RealtimeS2sUserConfig>)
-          : {};
-      const fromReq =
-        parsed.data.realtimeS2sConfig && typeof parsed.data.realtimeS2sConfig === 'object'
-          ? (parsed.data.realtimeS2sConfig as Partial<RealtimeS2sUserConfig>)
-          : {};
-      realtimeS2sConfig = normalizeRealtimeS2sUserConfig(
-        { ...fromAgent, ...fromReq },
-        voicePipeline,
-      );
-    }
-  }
-  const realtimeVoice =
-    voicePipeline === 'gemini_live'
-      ? resolveGeminiLiveVoice(
-          realtimeS2sConfig?.voice ?? parsed.data.realtimeVoice ?? agent.realtimeVoice,
-        )
-      : resolveRealtimeVoice(
-          realtimeS2sConfig?.voice ?? parsed.data.realtimeVoice ?? agent.realtimeVoice,
-        );
-  if (realtimeS2sConfig) {
-    realtimeS2sConfig.voice = realtimeVoice;
-  }
+  const fromAgent =
+    agent.realtimeS2sConfig && typeof agent.realtimeS2sConfig === 'object'
+      ? (agent.realtimeS2sConfig as Partial<RealtimeS2sUserConfig>)
+      : {};
+  const fromReq =
+    parsed.data.realtimeS2sConfig && typeof parsed.data.realtimeS2sConfig === 'object'
+      ? (parsed.data.realtimeS2sConfig as Partial<RealtimeS2sUserConfig>)
+      : {};
+  const realtimeS2sConfig = normalizeRealtimeS2sUserConfig(
+    { ...fromAgent, ...fromReq },
+    voicePipeline,
+  );
+  const realtimeVoice = resolveGeminiLiveVoice(
+    realtimeS2sConfig.voice ?? parsed.data.realtimeVoice ?? agent.realtimeVoice,
+  );
+  realtimeS2sConfig.voice = realtimeVoice;
 
   const call = await prisma.call.create({
     data: {
@@ -109,7 +92,7 @@ simulator2LivekitRouter.post('/token', async (req, res) => {
         v2Session: {
           voicePipeline,
           realtimeVoice,
-          ...(realtimeS2sConfig ? { realtimeS2sConfig } : {}),
+          realtimeS2sConfig,
         } satisfies Simulator2CallSessionPayload,
       }),
     },
@@ -125,13 +108,9 @@ simulator2LivekitRouter.post('/token', async (req, res) => {
       simulatorVersion: '2.0',
       voicePipeline,
       realtimeVoice,
-      ...(realtimeS2sConfig
-        ? {
-            realtimeS2sConfig,
-            s2sVoice: realtimeS2sConfig.voice,
-            s2sModel: realtimeS2sConfig.model,
-          }
-        : {}),
+      realtimeS2sConfig,
+      s2sVoice: realtimeS2sConfig.voice,
+      s2sModel: realtimeS2sConfig.model,
       ...(prospectName ? { prospectName } : {}),
       ...(contactPhone ? { contactPhone } : {}),
       ...(contactEmail ? { contactEmail } : {}),

@@ -31,6 +31,34 @@ describe('parsePreferredTime', () => {
     assert.ok(parsed);
     assert.equal(parsed!.scheduledStart.getTime(), istWallToUtcDate(2026, 8, 4, 10, 0).getTime());
   });
+
+  it('resolves next to next week Tuesday on Tue 22 Sep 2026 to 6 Oct', () => {
+    const tue = new Date('2026-09-22T04:30:00.000Z'); // 10:00 IST Tue 22 Sep
+    const parsed = parsePreferredTime('next to next week Tuesday', { now: tue });
+    assert.ok(parsed);
+    assert.equal(parsed!.scheduledStart.getTime(), istWallToUtcDate(2026, 10, 6, 11, 0).getTime());
+  });
+
+  it('resolves next week Tuesday on Tue 22 Sep 2026 to 29 Sep', () => {
+    const tue = new Date('2026-09-22T04:30:00.000Z');
+    const parsed = parsePreferredTime('next week Tuesday', { now: tue });
+    assert.ok(parsed);
+    assert.equal(parsed!.scheduledStart.getTime(), istWallToUtcDate(2026, 9, 29, 11, 0).getTime());
+  });
+
+  it('resolves agle agle hafte mangalvaar like next to next Tuesday', () => {
+    const tue = new Date('2026-09-22T04:30:00.000Z');
+    const parsed = parsePreferredTime('agle agle hafte mangalvaar', { now: tue });
+    assert.ok(parsed);
+    assert.equal(parsed!.scheduledStart.getTime(), istWallToUtcDate(2026, 10, 6, 11, 0).getTime());
+  });
+
+  it('bare Tuesday on a Tuesday still jumps +7 days', () => {
+    const tue = new Date('2026-09-22T04:30:00.000Z');
+    const parsed = parsePreferredTime('Tuesday', { now: tue });
+    assert.ok(parsed);
+    assert.equal(parsed!.scheduledStart.getTime(), istWallToUtcDate(2026, 9, 29, 11, 0).getTime());
+  });
 });
 
 describe('availability paint', () => {

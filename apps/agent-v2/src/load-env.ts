@@ -13,13 +13,16 @@ config({ path: resolve(pkgRoot, '.env'), override: true });
 
 const nexoraUrl =
   process.env.NEXORA_FACTS_QUERY_URL?.trim() || process.env.NEXORA_HOTEL_FACTS_URL?.trim() || '';
-const nexoraToken = process.env.NEXORA_INGEST_TOKEN?.trim() || '';
+const nexoraToken =
+  process.env.NEXORA_FACTS_QUERY_TOKEN?.trim() || process.env.NEXORA_INGEST_TOKEN?.trim() || '';
 if (nexoraUrl && nexoraToken) {
   console.info(
     `[vsa] Nexora facts configured — urlHost=${safeHost(nexoraUrl)} token=${nexoraToken.slice(0, 14)}…${nexoraToken.slice(-4)}`,
   );
 } else {
-  console.warn('[vsa] Nexora facts NOT configured (missing NEXORA_FACTS_QUERY_URL or NEXORA_INGEST_TOKEN)');
+  console.warn(
+    '[vsa] Nexora facts NOT configured (missing NEXORA_FACTS_QUERY_URL or NEXORA_FACTS_QUERY_TOKEN / NEXORA_INGEST_TOKEN)',
+  );
 }
 
 function safeHost(url: string): string {

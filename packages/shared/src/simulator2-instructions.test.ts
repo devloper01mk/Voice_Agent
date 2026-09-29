@@ -5,7 +5,9 @@ import {
   compactSystemPrompt,
   compileSystemPrompt,
   emptySimulator2TurnState,
+  FAKE_BOOKING_CORRECTION_LINE,
   inflectSafetyCopy,
+  looksLikeBookingConfirmedClaim,
   markBookingSaved,
   mergeSkillsConfig,
   prepareSimulator2UserTurn,
@@ -24,8 +26,8 @@ const sampleAgent = {
   productName: 'Acme CRM',
   voiceId: 'voice',
   voiceSpeed: 1,
-  llmProvider: 'groq' as const,
-  llmModel: 'llama',
+  llmProvider: 'gpt' as const,
+  llmModel: 'gpt-5.4-mini',
   brainMarkdown: '## Cronberry\nPlans start at 499.',
   skillsConfig: mergeSkillsConfig(null),
 };
@@ -38,14 +40,14 @@ describe('Simulator 2 / shared brain', () => {
     assert.match(resolveSimulator2LlmModel(), /gpt-5/);
   });
 
-  it('uses the Agent Studio LLM for live calls', () => {
+  it('uses the Agent Studio LLM for live calls (GPT only)', () => {
     assert.deepEqual(resolveCallLlm({ llmProvider: 'gpt', llmModel: 'gpt-4o-mini' }), {
       provider: 'gpt',
       model: 'gpt-4o-mini',
     });
     assert.deepEqual(
       resolveCallLlm({ llmProvider: 'groq', llmModel: 'llama-3.3-70b-versatile' }),
-      { provider: 'groq', model: 'llama-3.3-70b-versatile' },
+      { provider: 'gpt', model: 'llama-3.3-70b-versatile' },
     );
     assert.equal(
       resolveCallLlm({ llmProvider: 'gpt', llmModel: '  ' }).model,
@@ -502,6 +504,16 @@ describe('Simulator 2 / shared brain', () => {
     assert.equal(result.kind, 'reply');
     if (result.kind !== 'reply') return;
     assert.match(result.userContent, /NOT returned ok:true/i);
+    assert.equal(looksLikeBookingConfirmedClaim('Aapki booking confirm ho gayi hai 15 September ko.'), true);
+    assert.equal(
+      looksLikeBookingConfirmedClaim(
+        'Is it Yadav Singh? Please confirm so I can finalize your Deluxe King room booking.',
+      ),
+      false,
+    );
+    assert.equal(looksLikeBookingConfirmedClaim(FAKE_BOOKING_CORRECTION_LINE), false);
+    assert.match(FAKE_BOOKING_CORRECTION_LINE, /save pending|save nahi/i);
+    assert.doesNotMatch(FAKE_BOOKING_CORRECTION_LINE, /\bconfirm\b/i);
   });
 
   it('persists phone digits when capture is briefly inactive', async () => {

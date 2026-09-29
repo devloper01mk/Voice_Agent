@@ -10,7 +10,6 @@ import {
 import { ConnectionState, RoomEvent, type AudioCaptureOptions } from 'livekit-client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  isGeminiLivePipeline,
   isS2sPipeline,
   normalizeVoicePipeline,
   realtimeS2sUserConfigToSessionConfig,
@@ -22,7 +21,6 @@ import {
 } from '@vsa/shared';
 import SimulatorSetupForm from '../components/SimulatorSetupForm';
 import CallSummaryPanel from '../components/CallSummaryPanel';
-import EstimatedUsagePanel from '../components/EstimatedUsagePanel';
 import S2sEstimatedUsagePanel from '../components/S2sEstimatedUsagePanel';
 import LatencyReadout, { formatDuration } from '../components/LatencyReadout';
 import LiveTranscriptPanel from '../components/LiveTranscriptPanel';
@@ -412,14 +410,14 @@ function CallSession({
             <p className="sim-agent-state">
               LLM:{' '}
               {s2sActive && liveS2sConfig
-                ? `OpenAI Realtime · ${liveS2sConfig.model}`
+                ? `Gemini Live · ${liveS2sConfig.model}`
                 : formatLlmLabel(llmProvider, llmModel)}
             </p>
             <p className="sim-agent-state">
               Voice:{' '}
               {s2sActive && liveS2sConfig
-                ? `${liveS2sConfig.voice} (OpenAI Realtime)`
-                : 'Cartesia TTS (Studio voice)'}
+                ? `${liveS2sConfig.voice} (Gemini Live)`
+                : 'Gemini Live (Studio voice)'}
             </p>
             <p className="sim-agent-state">
               Mic: {micError || (isMicrophoneEnabled && micPublished ? 'on' : 'starting…')}
@@ -492,15 +490,11 @@ function CallSession({
             </div>
           </div>
           <LatencyReadout metrics={metrics} highlightFelt feltTargetMs={FELT_LATENCY_TARGET_MS} />
-          {s2sActive ? (
-            <S2sEstimatedUsagePanel
-              metrics={metrics}
-              provider={liveS2sConfig?.provider ?? s2sConfig?.provider}
-              model={liveS2sConfig?.model ?? s2sConfig?.model}
-            />
-          ) : (
-            <EstimatedUsagePanel metrics={metrics} llmProvider={llmProvider} />
-          )}
+          <S2sEstimatedUsagePanel
+            metrics={metrics}
+            provider={liveS2sConfig?.provider ?? s2sConfig?.provider}
+            model={liveS2sConfig?.model ?? s2sConfig?.model}
+          />
         </section>
 
         {s2sActive && liveS2sConfig && (
@@ -524,8 +518,7 @@ function CallSession({
 }
 
 function formatLlmLabel(provider: string, model: string) {
-  const name = provider === 'gpt' ? 'GPT' : 'Groq';
-  return `${name} · ${model}`;
+  return `GPT · ${model}`;
 }
 
 export default function Simulator2Page() {
@@ -616,8 +609,7 @@ export default function Simulator2Page() {
   const effectivePipeline: VoicePipeline =
     sessionPipeline ?? normalizeVoicePipeline(selectedAgent?.voicePipeline);
   const s2sActive = isS2sPipeline(effectivePipeline);
-  const studioLlmProvider: LlmProvider =
-    selectedAgent?.llmProvider === 'gpt' ? 'gpt' : 'groq';
+  const studioLlmProvider: LlmProvider = 'gpt';
   const studioLlmModel = selectedAgent?.llmModel ?? '—';
 
   return (
@@ -627,23 +619,22 @@ export default function Simulator2Page() {
           <span className="page-icon" aria-hidden>
             ⚡
           </span>
-          Call Simulator 2.0
+          Call Simulator
         </h1>
         <span className="sim-v2-badge">LOW LATENCY</span>
       </div>
       <p className="page-subtitle">
-        Uses the voice pipeline saved on the agent in Studio (Cascaded, OpenAI Realtime, or Gemini
-        Live).
+        Uses Gemini Live speech-to-speech from the agent saved in Studio.
       </p>
       {s2sActive && (
         <div className="sim-v2-banner">
-          {isGeminiLivePipeline(effectivePipeline) ? 'Gemini Live S2S active' : 'OpenAI Realtime S2S active'}
+          Gemini Live S2S active
           {sessionS2sConfig
             ? ` · ${sessionS2sConfig.model} · ${sessionS2sConfig.voice}`
             : selectedAgent?.realtimeVoice
               ? ` · voice ${selectedAgent.realtimeVoice}`
               : ''}
-          . Azure STT and Cartesia TTS are skipped for this call.
+          .
         </div>
       )}
 
@@ -670,7 +661,7 @@ export default function Simulator2Page() {
                 <>
                   ⚡{' '}
                   {s2sActive
-                    ? `${isGeminiLivePipeline(effectivePipeline) ? 'Gemini Live' : 'OpenAI Realtime'} S2S`
+                    ? 'Gemini Live S2S'
                     : formatLlmLabel(
                         selectedAgent.llmProvider,
                         selectedAgent.llmModel,
@@ -688,20 +679,11 @@ export default function Simulator2Page() {
               formatDuration={formatDuration}
               latencyReadout={<LatencyReadout metrics={lastSummary.metrics} highlightFelt feltTargetMs={FELT_LATENCY_TARGET_MS} />}
               usagePanel={
-                s2sActive ||
-                (lastSummary.metrics.totalS2sTokens ?? 0) > 0 ||
-                (lastSummary.metrics.totalS2sInputAudioTokens ?? 0) > 0 ? (
-                  <S2sEstimatedUsagePanel
-                    metrics={lastSummary.metrics}
-                    provider={
-                      sessionS2sConfig?.provider ??
-                      (isGeminiLivePipeline(effectivePipeline) ? 'gemini' : 'openai')
-                    }
-                    model={sessionS2sConfig?.model}
-                  />
-                ) : (
-                  <EstimatedUsagePanel metrics={lastSummary.metrics} llmProvider={studioLlmProvider} />
-                )
+                <S2sEstimatedUsagePanel
+                  metrics={lastSummary.metrics}
+                  provider="gemini"
+                  model={sessionS2sConfig?.model}
+                />
               }
             />
           )}

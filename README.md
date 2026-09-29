@@ -1,16 +1,6 @@
 # Voice Sales Agent
 
-Voice sales agent with **Agent Studio** + **Call Simulator**.
-
-## Documentation
-
-How the system works (explanations + flow diagrams):
-
-| Doc | Contents |
-|-----|----------|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System overview, stack, end-to-end call flow |
-| [docs/BACKEND.md](docs/BACKEND.md) | Express API, Prisma models, LiveKit voice worker |
-| [docs/FRONTEND.md](docs/FRONTEND.md) | React Studio & Simulator, API client map |
+Agent Studio + Call Simulator 2.0 with **Gemini Live** voice (LiveKit SIP / Acefone).
 
 ## Stack
 
@@ -19,80 +9,74 @@ How the system works (explanations + flow diagrams):
 | Frontend | React (Vite) |
 | Backend API | Node.js (Express) |
 | Database | PostgreSQL (Prisma) |
-| Voice worker | LiveKit Agents (Node.js) |
-| STT | Azure Speech |
-| LLM | Groq **or** OpenAI GPT (per agent) |
-| TTS | Cartesia |
-| Realtime | LiveKit |
+| Voice worker | LiveKit Agents (`apps/agent-v2`) |
+| Voice model | Gemini Live S2S |
+| Realtime | LiveKit (+ optional Acefone WSS) |
 
 ## Quick start
 
-### 1. PostgreSQL
+### 1. Postgres + env
 
 ```bash
 docker compose up -d
 cp .env.example .env
-# Edit .env with your API keys
+# Set GEMINI_API_KEY, LIVEKIT_*, and keep API_AUTH_TOKEN / VITE_API_AUTH_TOKEN in sync
 ```
 
-### 2. Install dependencies
+### 2. Install + migrate
 
 ```bash
 npm install
+npm run db:migrate
 ```
 
-### 3. Database migrate
+### 3. Run (3 terminals)
 
 ```bash
-npm run db:push
+npm run dev:api        # http://localhost:3001
+npm run dev:agent-v2   # LiveKit worker (voice-sales-agent-v2)
+npm run dev:web        # http://localhost:5174
 ```
 
-### 4. Run services (3 terminals)
+### 4. Use the app
+
+1. Open **Agent Studio** — create agent, Brain, Gemini Live settings, Save  
+2. Open **Simulator 2.0** or **Outbound** — start a call (needs LiveKit + agent-v2 + `GEMINI_API_KEY`)
+
+## Auth
+
+When `API_AUTH_TOKEN` is set, `/api/*` and `/stream` require:
+
+- `Authorization: Bearer <token>`, or  
+- `X-API-Key: <token>`, or  
+- `?token=<token>` (EventSource / Acefone WSS URL)
+
+Acefone provider webhooks (`/api/telephony/webhooks/*`, `/api/telephony/voice/*`) stay public.  
+Leave `API_AUTH_TOKEN` empty only for open local experimentation.
+
+## Tests / CI
 
 ```bash
-npm run dev:api      # http://localhost:3001
-npm run dev:agent    # LiveKit agent worker
-npm run dev:web      # http://localhost:5173
+npm test          # shared + api unit tests
+npm run typecheck # tsc across workspaces
 ```
 
-### 5. Use the app
+## Docs
 
-1. Open **Agent Studio** — create agent, set Brain, pick Groq or GPT, Save
-2. Preview Cartesia voice (needs `CARTESIA_API_KEY` on API)
-3. Open **Call Simulator** — Start call (needs LiveKit + agent worker + Azure STT)
-
-## Environment variables
-
-See [.env.example](.env.example).
-
-| Variable | Used by |
-|----------|---------|
-| `DATABASE_URL` | API |
-| `LIVEKIT_*` | API (tokens), Agent |
-| `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION` | Agent (STT) |
-| `GROQ_API_KEY` | Agent (when agent uses Groq) |
-| `OPENAI_API_KEY` | Agent (when agent uses GPT) |
-| `CARTESIA_API_KEY` | API (preview), Agent (TTS) |
-| `API_URL` | Agent (load agent config) |
+| Doc | Contents |
+|-----|----------|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System overview (may lag Gemini-only cleanup) |
+| [docs/BACKEND.md](docs/BACKEND.md) | Express API / Prisma |
+| [docs/FRONTEND.md](docs/FRONTEND.md) | React Studio & Simulator |
+| [docs/TELEPHONY-OUTBOUND.md](docs/TELEPHONY-OUTBOUND.md) | Outbound phone |
 
 ## Project structure
 
 ```
 apps/
-  api/     Express + Prisma + LiveKit token API
-  agent/   LiveKit voice worker (Azure STT → LLM → Cartesia)
-  web/     React UI
+  api/       Express + Prisma + Acefone Gemini Live telephony
+  agent-v2/  LiveKit Gemini Live worker
+  web/       React UI (Studio, Simulator 2.0, Outbound)
 packages/
-  shared/  Prompt compiler (Brain + Skills → system prompt)
+  shared/    Prompts, booking/phone helpers, Gemini Live config
 ```
-
-## Brain + Skills
-
-On **Save**, Brain markdown and default sales skills are compiled into `compiled_system_prompt` in PostgreSQL. The agent worker loads it once per call.
-
-## LLM provider
-
-Set per agent in Studio:
-
-- **Groq** — `openai.LLM.withGroq()` (fast, needs `GROQ_API_KEY`)
-- **GPT** — `openai.LLM()` (needs `OPENAI_API_KEY`)

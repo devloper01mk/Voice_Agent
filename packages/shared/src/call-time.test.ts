@@ -10,6 +10,8 @@ import {
   getIstNowParts,
   greetingForDayPart,
   isTimeOfDayGreeting,
+  istWeekBounds,
+  resolveIstWeekdayInWeek,
 } from './call-time.ts';
 
 describe('dayPartFromHour', () => {
@@ -103,6 +105,8 @@ describe('buildCallTimeContextPrompt', () => {
     assert.match(prompt, /19 July 2026/);
     assert.match(prompt, /Past datetime validation/i);
     assert.match(prompt, /Always confirm/i);
+    assert.match(prompt, /Live lookup tools/i);
+    assert.doesNotMatch(prompt, /hotel|test drive|10 AM – 7 PM/i);
   });
 });
 
@@ -112,6 +116,35 @@ describe('buildRelativeDateRulesPrompt', () => {
     const rules = buildRelativeDateRulesPrompt(now);
     assert.match(rules, /parso/);
     assert.match(rules, /19 July 2026/);
+  });
+
+  it('maps next to next week Tuesday for Tue 22 Sep 2026 IST', () => {
+    // 22 Sep 2026 10:00 IST = 22 Sep 2026 04:30 UTC (Tuesday)
+    const now = new Date('2026-09-22T04:30:00.000Z');
+    const cal = getIstCalendarParts(now);
+    assert.equal(cal.weekday, 'Tuesday');
+    assert.equal(cal.isoDate, '2026-09-22');
+
+    const next2Tue = resolveIstWeekdayInWeek(now, 2, 2);
+    assert.equal(next2Tue.isoDate, '2026-10-06');
+    assert.equal(next2Tue.weekday, 'Tuesday');
+
+    const next2Thu = resolveIstWeekdayInWeek(now, 2, 4);
+    assert.equal(next2Thu.isoDate, '2026-10-08');
+
+    const nextTue = resolveIstWeekdayInWeek(now, 1, 2);
+    assert.equal(nextTue.isoDate, '2026-09-29');
+
+    const thisWeek = istWeekBounds(now, 0);
+    assert.equal(thisWeek.monday.isoDate, '2026-09-21');
+    assert.equal(thisWeek.sunday.isoDate, '2026-09-27');
+
+    const rules = buildRelativeDateRulesPrompt(now);
+    assert.match(rules, /Monday–Sunday IST/i);
+    assert.match(rules, /next to next week Tuesday/i);
+    assert.match(rules, /6 October 2026/);
+    assert.match(rules, /2026-10-06/);
+    assert.match(rules, /8 October 2026/);
   });
 });
 

@@ -6,12 +6,13 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "build": "tsc",
+    "test": "node --import tsx --test $(find src -name '*.test.ts' | sort)",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
+    "db:migrate:deploy": "prisma migrate deploy",
     "db:push": "prisma db push"
   },
   "dependencies": {
-    "@google-cloud/speech": "^6.7.1",
     "@google/genai": "^2.20.0",
     "@prisma/client": "^6.3.1",
     "@vsa/shared": "*",
@@ -19,7 +20,6 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "livekit-server-sdk": "^2.9.1",
-    "microsoft-cognitiveservices-speech-sdk": "^1.51.0",
     "ws": "^8.21.3",
     "zod": "^3.24.2"
   },

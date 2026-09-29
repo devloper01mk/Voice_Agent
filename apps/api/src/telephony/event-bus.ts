@@ -45,6 +45,7 @@ export function subscribeTelephonyEvents(callId: string, listener: Listener): ()
   };
 }
 
+/** Drop buffered SSE history + listeners when a call ends. */
 export function clearTelephonyEventBuffer(callId: string): void {
   buffers.delete(callId);
   listeners.delete(callId);

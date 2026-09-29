@@ -1,12 +1,43 @@
 import * as google from '@livekit/agents-plugin-google';
-import { Modality, ThinkingLevel } from '@google/genai';
 import {
+  ActivityHandling,
+  EndSensitivity,
+  Modality,
+  StartSensitivity,
+  ThinkingLevel,
+} from '@google/genai';
+import {
+  DEFAULT_SPOKEN_TURN_MAX_TOKENS,
   geminiLiveThinkingConfig,
   isGemini31LiveModel,
   normalizeRealtimeS2sUserConfig,
   resolveGeminiLiveVoice,
+  resolveLiveKitGeminiModel,
   type RealtimeS2sUserConfig,
 } from '@vsa/shared';
+import { applyGeminiRealtimePatches } from './gemini-realtime-patch.js';
+
+applyGeminiRealtimePatches();
+
+function mapGeminiLiveThinkingConfig(
+  raw: ReturnType<typeof geminiLiveThinkingConfig>,
+):
+  | { thinkingBudget: number }
+  | { thinkingLevel: ThinkingLevel }
+  | undefined {
+  if (!raw) return undefined;
+  if ('thinkingBudget' in raw) return raw;
+  if ('thinkingLevel' in raw) {
+    const map: Record<string, ThinkingLevel> = {
+      minimal: ThinkingLevel.MINIMAL,
+      low: ThinkingLevel.LOW,
+      medium: ThinkingLevel.MEDIUM,
+      high: ThinkingLevel.HIGH,
+    };
+    return { thinkingLevel: map[raw.thinkingLevel] ?? ThinkingLevel.LOW };
+  }
+  return undefined;
+}
 
 export function createGeminiLiveModel(opts?: {
   voice?: string | null;
@@ -28,10 +59,13 @@ export function createGeminiLiveModel(opts?: {
   const voice = resolveGeminiLiveVoice(config.voice ?? opts?.voice);
   const language =
     config.languageCode && config.languageCode !== 'auto' ? config.languageCode : undefined;
-  let model = config.model || opts?.model?.trim() || 'gemini-2.5-flash-native-audio-preview-12-2025';
+  const requested = config.model || opts?.model?.trim() || 'gemini-3.8-live';
+  let model = resolveLiveKitGeminiModel(requested);
+  if (model !== requested) {
+    console.warn(`[vsa] ${requested} cannot speak proactively on LiveKit (opener / check-ins) — using ${model}`);
+  }
 
-  // Use Agent Studio / API selected model as-is (including gemini-3.1-flash-live-preview).
-  // Optional override only if explicitly forced off: GEMINI_LIVE_FORCE_25=1
+  // Optional override: GEMINI_LIVE_FORCE_25=1 forces older 2.5 native-audio
   if (process.env.GEMINI_LIVE_FORCE_25 === '1' && isGemini31LiveModel(model)) {
     const stable = 'gemini-2.5-flash-native-audio-preview-12-2025';
     console.warn(`[vsa] GEMINI_LIVE_FORCE_25=1 — remapping ${model} → ${stable}`);
@@ -42,11 +76,7 @@ export function createGeminiLiveModel(opts?: {
     `[vsa] Gemini Live S2S: model=${model} voice=${voice}${language ? ` lang=${language}` : ''}${opts?.telephony ? ' (telephony)' : ''}`,
   );
 
-  const rawThinking = geminiLiveThinkingConfig(model);
-  const thinkingConfig =
-    rawThinking && 'thinkingLevel' in rawThinking
-      ? { thinkingLevel: ThinkingLevel.MINIMAL }
-      : rawThinking;
+  const thinkingConfig = mapGeminiLiveThinkingConfig(geminiLiveThinkingConfig(model));
 
   return new google.realtime.RealtimeModel({
     apiKey,
@@ -57,15 +87,29 @@ export function createGeminiLiveModel(opts?: {
     modalities: [Modality.AUDIO],
     inputAudioTranscription: {},
     outputAudioTranscription: {},
-    // Gemini 3.x wants thinkingLevel; 2.5 uses thinkingBudget.
-    thinkingConfig,
+    // 3.8-live: omit thinking; 3.8-extended: low; 3.1: minimal; 2.5: budget 0
+    ...(thinkingConfig ? { thinkingConfig } : {}),
     maxOutputTokens:
-      config.maxTokensMode === 'custom'
-        ? config.maxTokensCustom
-        : // Enough for a complete multi-sentence Hinglish reply (220/512 were cutting speech).
-          1100,
-    realtimeInputConfig:
-      config.turnDetectionMode === 'normal'
+      config.maxTokensMode === 'custom' ? config.maxTokensCustom : DEFAULT_SPOKEN_TURN_MAX_TOKENS,
+    // Drop oldest audio once the window fills so a long call keeps tools and recent facts.
+    contextWindowCompression: {
+      triggerTokens: '80000',
+      slidingWindow: { targetTokens: '40000' },
+    },
+    realtimeInputConfig: opts?.telephony
+      ? {
+          // Phone echo must not cut the sentence or look like the caller spoke.
+          // A real reply still starts after the agent finishes and the line is quiet.
+          activityHandling: ActivityHandling.NO_INTERRUPTION,
+          automaticActivityDetection: {
+            startOfSpeechSensitivity: StartSensitivity.START_SENSITIVITY_LOW,
+            // End the caller turn quickly. A long quiet wait was most of the gap before lookup.
+            endOfSpeechSensitivity: EndSensitivity.END_SENSITIVITY_HIGH,
+            prefixPaddingMs: 200,
+            silenceDurationMs: 350,
+          },
+        }
+      : config.turnDetectionMode === 'normal'
         ? {
             automaticActivityDetection: {
               prefixPaddingMs: config.turnDetectionPrefixPaddingMs,

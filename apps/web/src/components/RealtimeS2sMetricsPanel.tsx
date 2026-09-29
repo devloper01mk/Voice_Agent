@@ -23,7 +23,7 @@ export default function RealtimeS2sMetricsPanel({
   const rows: Array<{ label: string; value: string }> = [
     {
       label: 'Pipeline',
-      value: config.pipeline === 'gemini_live' ? 'Gemini Live S2S' : 'OpenAI Realtime S2S',
+      value: 'Gemini Live S2S',
     },
     { label: 'Preset', value: config.source === 'simulator_force_s2s' ? 'Force S2S (budget)' : 'Studio default' },
     { label: 'Model', value: config.model },

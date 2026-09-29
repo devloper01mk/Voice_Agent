@@ -34,14 +34,14 @@ const FAILURE_DELTA = 0.1;
 const OUTCOME_SUCCESS_DELTA = 0.05;
 const OUTCOME_FAILURE_DELTA = 0.07;
 
-function toVector(input: unknown): number[] {
+export function toVector(input: unknown): number[] {
   if (!Array.isArray(input)) return [];
   return input
     .map((v) => (typeof v === 'number' ? v : Number(v)))
     .filter((v) => Number.isFinite(v));
 }
 
-function cosineSimilarity(a: number[], b: number[]): number {
+export function cosineSimilarity(a: number[], b: number[]): number {
   if (a.length === 0 || b.length === 0 || a.length !== b.length) return -1;
   let dot = 0;
   let magA = 0;
@@ -121,6 +121,31 @@ export async function embedText(text: string): Promise<number[] | null> {
       '[learnings] embedText failed:',
       err instanceof Error ? err.message : err,
     );
+    return null;
+  }
+}
+
+/** Batch embeddings; returns null for the whole batch on any failure. */
+export async function embedTexts(texts: string[]): Promise<number[][] | null> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey || texts.length === 0) return null;
+  try {
+    const res = await fetch('https://api.openai.com/v1/embeddings', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ model: EMBEDDING_MODEL, input: texts }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as OpenAIEmbeddingResponse;
+    const vectors = (data.data ?? []).map((d) => d.embedding);
+    if (vectors.length !== texts.length || vectors.some((v) => !Array.isArray(v))) return null;
+    return vectors as number[][];
+  } catch (err) {
+    console.warn('[learnings] embedTexts failed:', err instanceof Error ? err.message : err);
     return null;
   }
 }

@@ -11,7 +11,6 @@ import {
   type RuntimeConfig,
   type SkillsConfig,
   type SpeakLanguage,
-  type SttProvider,
 } from './skills-types.js';
 import {
   DEFAULT_BOOKING_POLICY,
@@ -20,8 +19,59 @@ import {
 } from './booking-policy.js';
 import { lockSpokenHinglishGender } from './hinglish-gender.js';
 import { normalizeLeadMemoryRetentionHours } from './lead-memory.js';
+import {
+  buildProductKnowledgeCatalogMap,
+  isLargeProductKnowledge,
+  PRODUCT_KNOWLEDGE_SEARCH_TOOL,
+} from './product-knowledge.js';
+import { resolvePackForBooking } from './packs/index.js';
+import { applyPlaybookToBooking, buildPlaybookPrompt, resolvePlaybook } from './playbook.js';
 
-export type { AgentGender, ComplianceConfig, CoreSkillsConfig, LlmProvider, RuntimeConfig, SkillsConfig, SpeakLanguage, SttProvider } from './skills-types.js';
+export {
+  VERTICAL_PACKS,
+  getPack,
+  isPackId,
+  resolvePackForBooking,
+  type PackId,
+  type PackTurnInput,
+  type VerticalPack,
+} from './packs/index.js';
+
+export {
+  PLAYBOOK_TEMPLATES,
+  PLAYBOOK_LIMITS,
+  SALES_PLAYBOOK_HEADING,
+  normalizePlaybook,
+  getPlaybookTemplate,
+  resolvePlaybook,
+  applyPlaybookToBooking,
+  applyPlaybookToSkills,
+  applyPlaybookTemplate,
+  buildPlaybookPrompt,
+  type SalesPlaybook,
+  type PlaybookGoal,
+  type PlaybookField,
+  type PlaybookDateMode,
+  type PlaybookTemplate,
+} from './playbook.js';
+
+export {
+  PRODUCT_KNOWLEDGE_INLINE_CHARS,
+  PRODUCT_KNOWLEDGE_CATALOG_MAP_CHARS,
+  PRODUCT_KNOWLEDGE_SEARCH_TOOL,
+  PRODUCT_KNOWLEDGE_SEARCH_TOOL_DESCRIPTION,
+  isLargeProductKnowledge,
+  chunkProductKnowledge,
+  buildProductKnowledgeCatalogMap,
+  tokenizeForSearch,
+  keywordScores,
+  rankProductKnowledgeChunks,
+  formatProductKnowledgeHits,
+  type ProductKnowledgeChunkInput,
+  type ProductKnowledgeHit,
+} from './product-knowledge.js';
+
+export type { AgentGender, ComplianceConfig, CoreSkillsConfig, LlmProvider, RuntimeConfig, SkillsConfig, SpeakLanguage } from './skills-types.js';
 export type {
   BookingPolicy,
   BookingPolicyTemplateId,
@@ -29,6 +79,7 @@ export type {
   BookingRequiredField,
   BookingDiscussGate,
   BookingLocationType,
+  BookingCustomField,
 } from './booking-policy.js';
 export {
   DEFAULT_BOOKING_POLICY,
@@ -40,56 +91,22 @@ export {
   missingBookingDiscussGates,
   bookingDiscussGateRejection,
   bookingDiscussGateToolProperties,
+  missingCustomFields,
   bookingTypeForOutcome,
   vocabularyForOutcome,
   resolveBookingType,
   bookingSavedConfirmMessage,
   normalizeBookingTypeSlug,
 } from './booking-policy.js';
-export {
-  DEFAULT_GOOGLE_SPEECH_LOCATION,
-  DEFAULT_GOOGLE_STT_MODEL,
-  DEFAULT_OPENAI_STT_MODEL,
-  DEFAULT_SARVAM_STT_MODEL,
-  DEFAULT_STT_PROVIDER,
-  GOOGLE_STT_MODEL_OPTIONS,
-  OPENAI_STT_MODEL_OPTIONS,
-  SARVAM_STT_MODEL_OPTIONS,
-  buildGoogleRecognizerPath,
-  defaultSttModel,
-  googleSttLanguageCodes,
-  isGoogleSttModel,
-  isOpenAiSttModel,
-  isSarvamSttModel,
-  normalizeSttProvider,
-  openAiSttDetectLanguage,
-  openAiSttLanguage,
-  resolveGoogleCloudProjectId,
-  resolveGoogleSpeechLocation,
-  resolveSttModel,
-  sarvamSttLanguageCode,
-  sarvamSttMode,
-  type GoogleSttModel,
-  type OpenAiSttModel,
-  type SarvamSttModel,
-} from './stt-providers.js';
 
 export {
   DEFAULT_REALTIME_VOICE,
-  DEFAULT_FEMALE_REALTIME_VOICE,
   DEFAULT_VOICE_PIPELINE,
-  FEMALE_REALTIME_VOICES,
-  REALTIME_VOICE_OPTIONS,
-  isOpenaiRealtimePipeline,
   isGeminiLivePipeline,
   isS2sPipeline,
-  isFemaleRealtimeVoice,
-  isRealtimeVoice,
   normalizeVoicePipeline,
   resolveRealtimeVoice,
-  buildRealtimeS2sInstructionSupplement,
   type RealtimeVoice,
-  type RealtimeVoiceGender,
   type VoicePipeline,
 } from './voice-pipeline.js';
 
@@ -106,6 +123,8 @@ export {
   isGeminiLiveVoice,
   isGeminiLiveModel,
   isGemini31LiveModel,
+  isGemini38LiveModel,
+  isGemini38LiveExtendedThinkingModel,
   isFemaleGeminiLiveVoice,
   resolveGeminiLiveVoice,
   resolveGeminiLiveModel,
@@ -115,6 +134,9 @@ export {
   estimateGeminiLiveCostInr,
   buildGeminiLiveS2sInstructionSupplement,
   compressTelephonyS2sInstructions,
+  DEFAULT_SPOKEN_TURN_MAX_TOKENS,
+  isImmutableGeminiLiveModel,
+  resolveLiveKitGeminiModel,
   type GeminiLiveVoice,
   type GeminiLiveModel,
   type GeminiLiveLanguageCode,
@@ -239,7 +261,7 @@ ${polishRules}
   - **Price / amount / time / weight / height / age** match reply language as natural magnitude (not digit-by-digit): English → "two o'clock" / "1 PM" / "ten lakh" / "nine hundred fifty" / "forty-five" (kg); Hinglish → "do baje" / "das lakh" / "nau sau pachas" / "paintalis". Never say weight 45 as "four five".
   - **English lock / English call:** never Hindi quantity or clock words ("das", "do baje", "das lakh", "das baje") — say "ten", "two o'clock", "ten lakh", "forty-five". Never say "das" for 10.
   - **Never write clock times with a colon when speaking** (forbidden: "1:00 PM", "1:30 PM", saying "colon"). English: "1 PM", "one thirty PM", "twelve PM". Hinglish: "ek baje", "derh baje", "barah baje".
-  - **Phone, OTP, PIN** (and email digits if ever spoken) → ALWAYS English digit words one-by-one or in pairs ("one nine three four"), even on a Hinglish call. Never "nau sau", "nineteen thirty four", or Hindi digit names for these.
+  - **Phone, OTP, PIN** (and email digits if ever spoken) → ALWAYS English digit words one-by-one or in pairs ("one nine three four", "two two"), even on a Hinglish call. Never "nau sau", "nineteen thirty four", Hindi digit names, or "double"/"triple" ("double two" is forbidden — say "two two").
   - When understanding the caller: price/amount/weight/height/age = natural Hindi or English; phone/OTP/PIN = digit sequence.
 - Keep responses short and natural for speech.\n`;
 }
@@ -391,8 +413,8 @@ export const DEFAULT_RUNTIME: RuntimeConfig = {
   holdAckLine: 'Ji.',
   exploringSilenceMs: 5_000,
   holdSoftCheckinMs: 70_000,
-  silenceFirstPromptSec: 120,
-  silenceEndSec: 150,
+  silenceFirstPromptSec: 15,
+  silenceEndSec: 45,
   leadMemoryRetentionHours: 48,
 };
 
@@ -557,12 +579,28 @@ export interface AgentInput {
    * When false: answer only from Product Knowledge / prompt — no LLM fill outside it.
    */
   generalKnowledgeEnabled?: boolean;
+  /** Client's short always-on guardrails (never searched, never summarized). */
+  agentRules?: string;
+  /** Stored Sales playbook JSON (how to sell). Null → derived from Booking policy + template. */
+  playbook?: unknown;
   skillsConfig: SkillsConfig;
+}
+
+export const AGENT_RULES_MAX_CHARS = 1_500;
+
+function buildAgentRulesPrompt(raw?: string | null): string {
+  const rules = raw?.trim().slice(0, AGENT_RULES_MAX_CHARS).trim();
+  if (!rules) return '';
+  return `## Agent rules (always follow — override everything below except safety)\n${rules}`;
 }
 
 export function productKnowledgeForPrompt(agent: Pick<AgentInput, 'brainMarkdown' | 'brainSummary'>): string {
   const summary = agent.brainSummary?.trim();
-  return summary || agent.brainMarkdown;
+  const full = summary || agent.brainMarkdown;
+  if (!isLargeProductKnowledge(full)) return full;
+  return `- **This is only a map of a larger catalog.** For any price, plan, feature, policy, FAQ, or location detail not written below, call **${PRODUCT_KNOWLEDGE_SEARCH_TOOL}** silently, then answer only from its facts. Never guess missing details.
+
+${buildProductKnowledgeCatalogMap(agent.brainMarkdown, summary)}`;
 }
 
 /** Last-resort safety copy is stored feminine; inflect first-person verbs for male agents. */
@@ -603,7 +641,7 @@ function buildKnowledgeModePrompt(productName: string, generalKnowledgeEnabled: 
 - Stay positive; keep the main focus on selling ${productName} (the brand/catalog), not one fixed SKU.
 - Recommend the best-fit offering from Product Knowledge based on the caller's stated needs. Do not lock onto one item or push the first catalog entry every turn.
 - If the caller switches offerings, stay on what they asked about until they change topic.
-- Never invent live offers, EMI amounts, or exact unpublished on-road prices as confirmed quotes.`;
+- Never invent live offers, financing amounts, discounts, or unpublished prices as confirmed quotes.`;
   }
 
   return `## Knowledge mode: PROMPT ONLY (GENERAL KNOWLEDGE OFF)
@@ -615,7 +653,7 @@ function buildKnowledgeModePrompt(productName: string, generalKnowledgeEnabled: 
 }
 
 /**
- * Product-agnostic salesperson behaviour — same for hotel, auto, SaaS, or any catalog.
+ * Product-agnostic salesperson behaviour — same for every industry and catalog.
  * Facts come from Product Knowledge / tools; this only defines *how* to sell.
  */
 function buildConsultativeSalesProcessPrompt(productName: string): string {
@@ -631,7 +669,7 @@ Follow this order — **do not skip ahead**:
 2. **Discover** — need, use-case, timing, constraints. Ask **one** question per turn. Do not fire a form.
 3. **Value / features first** — from Product Knowledge, explain what fits and **why**. Teach; do not dump a full SKU/price menu on a yes/no existence ask.
 4. **Invite their ask** — if unclear, one soft line about what they want next — then wait. Prefer "aur kya jaanna hai?" over booking.
-5. **Quote / live options** — only when they ask price, options list, availability, or clear compare intent.
+5. **Quote / live options** — prices, rates, and discounts only when they ask kitna, rate, price, budget, discount, or mehnga. A location or feature answer has no number.
 6. **Soft close** — only on **clear buy/book/demo/visit intent** (book, reserve, le lunga, confirm). Never early "Kya main booking / demo arrange kar doon?" / "booking process start karein?" / "details collect karun?".
 7. **Capture** — collect only **missing** Booking-policy fields → save tool → say confirmed **only** after ok:true.
 
@@ -640,7 +678,7 @@ Follow this order — **do not skip ahead**:
 - Pushing booking / "shall I book / arrange / confirm for you?" / "booking start"
 - Inventing their dates, party size, name, or preferences
 - Saying anything is booked/confirmed without tool ok:true (including "booking confirm ho jayegi")
-- Inventing live room types, bed counts, or prices not returned by a live inventory tool
+- Inventing live availability, stock, prices, addresses, landmarks, distances, or policies not returned by a live tool or written in Product Knowledge. If it is missing, say you will check — never guess, and never promise it on WhatsApp.
 
 **Every turn:** answer **only** what they just asked (1–2 sentences) → at most **one** next question. Match their language. Answer objections on the **exact** topic asked — do not jump to booking.`;
 }
@@ -656,6 +694,7 @@ function buildPrinciplesPrompt(
   const compliance = skills.compliance ?? DEFAULT_COMPLIANCE;
   const runtime = skills.runtime ?? DEFAULT_RUNTIME;
   const maxRedirects = Math.max(1, skills.offTopic.maxRedirects);
+  const pack = resolvePackForBooking(skills.booking);
   const line = (raw: string) =>
     inflectSafetyCopy(fillSafetyPlaceholders(raw, productName, agentName), gender);
 
@@ -670,7 +709,7 @@ function buildPrinciplesPrompt(
 - **Product questions first:** If they ask about location, offerings, features, price, or availability facts in Product Knowledge (or live inventory tools when available) — answer that **now**. Never withhold the answer until they give name, phone, WhatsApp, or payment ack. Contact fields come only when they are ready to book/save.
 - **No intake funnel lock:** Do not reply to a product question with "pehle naam/number/dates chahiye". If dates/party size are already known this call, do not re-ask them to dodge the question.
 - **Topic switch / correction:** If they change topic, correct dates, or say "meri baat suno" / "aisa nahi" / "pehle jawab do", drop the previous checklist. Confirm the correction or answer the question in one short reply — no payment or upsell tagline.
-- **Dates:** Resolve relative weeks/days via **Call time (IST)**. Check-in and check-out must share a consistent calendar (same month unless the stay clearly crosses months). Speak the month name for both dates. On a date-correction turn, confirm dates only — do not mix payment.
+- **Dates:** Resolve relative weeks/days via **Call time (IST)**. On a date-correction turn for booking/save, confirm dates only — do not mix payment.
 - Social greetings ("kaise ho" / "how are you") are rapport, not a refusal topic: answer warmly, ask back once, do not pitch that turn.
 - Do not chain intake questions. After they share a preference, react and help from Product Knowledge rather than firing the next form field.
 - Never repeat a price, plan, or catalog recap already spoken this call. "Tell me more" → one new useful point, not a recap.
@@ -692,7 +731,6 @@ ${buildSalesSupportSkillsPrompt(skills, productName, agentName, gender)}
 - If unclear but safely interpretable from this call's history (prior facts, last question, Product Knowledge) → use that interpretation and continue. Do not ask an unnecessary question.
 - Ask **one** clarification **only when** remaining ambiguity would materially risk (1) the wrong spoken answer, (2) the wrong action, or (3) calling a tool incorrectly / with the wrong arguments.
 - Do not clarify for mild vagueness, mixed language, or messy STT when context already makes the meaning usable.
-- Stay / hotel: if they name a landmark, area, or vague place (not a clear city/state), clarify nearest city with one short question or 2–3 choices before lookup_hotel_availability — salesperson style, not a technical error.
 
 ${buildKnowledgeModePrompt(productName, generalKnowledgeEnabled)}
 
@@ -706,23 +744,16 @@ ${buildKnowledgeModePrompt(productName, generalKnowledgeEnabled)}
 - Human agent request: acknowledge (meaning: ${line(core.humanHandoff.acknowledge)}) and use schedule_callback with reason human_agent if they want a callback.
 - Audio issue: check they can hear you (meaning: ${line(core.audioIssue.checkLine)}); if it persists, offer a callback (meaning: ${line(core.audioIssue.callbackOffer)}).
 - Voicemail: one short message (meaning: ${line(core.voicemail.messageScript)}), then end_call.
-- Hold: stay silent; the system may send a one-word ack. Soft check-in only after ~${Math.round((runtime.holdSoftCheckinMs ?? 70_000) / 1000)}s if still on hold.
+- Hold: stay silent; the system may send a one-word ack. Soft "are you there?" follow-up only after ~${Math.round((runtime.holdSoftCheckinMs ?? 70_000) / 1000)}s if still on hold.
 - Flirty, medical, or deep personal-life digressions: polite boundary; do not engage. Brand complaints, ratings, warranty, and product location questions are product help — answer them.
 - After about ${maxRedirects} turns that are clearly not product help, warm goodbye and end_call.
 
 ## Tools
+- ${PRODUCT_KNOWLEDGE_SEARCH_TOOL} — product detail not visible in Product Knowledge → call silently with a short English query, answer from returned facts only.
 - capture_demo_lead — save only when the caller already wants the booking outcome and **Booking policy** gates are done. Never announce booked / noted / confirmed until the tool returns ok:true.
-${
-  mergeBookingPolicy(skills.booking).outcome === 'stay'
-    ? `- lookup_hotel_availability — **required** when the caller names a clear **city** and/or **state**. Pass city only / state only / both as they said (English: मनाली→Manali, आगरा→Agra). Do NOT invent state when only city was said. Every different city = a **new** tool call.\n` +
-      `- **Brain + live together:** Before saying a city has / does not have a property, check Product Knowledge AND live lookup. Existence and rates come from lookup; Brain adds sales vibe/policies only if they do not contradict live. NEVER deny a city from Product Knowledge alone. If fallback_to_brain:true, never deny; offer retry.\n` +
-      `- **Vague place (not a clear city/state)** — landmark, area, “pahad”, “Taj ke paas”, “Laxman Jhula”, “koi sasta trip”, etc.: do **NOT** call lookup yet and do **NOT** invent rates. Act like a salesperson: (1) short acknowledge, (2) map to a nearby known city OR offer 2–3 city choices (e.g. Rishikesh / Pushkar / Manali), (3) after they pick a city, call lookup_hotel_availability. Never say a dry technical “inventory nahi hai” for an unclear place.\n` +
-      `- **Sales tease OK, fake inventory NOT:** You may speak warmly about vibe (“premium / private / resort feel”) without dumping a full rate card. NEVER invent a specific room name (Suite, Premium Suite), bed count, or price unless that exact row is in the latest lookup_hotel_availability result. If unsure, say you will check live options.\n` +
-      `- **Multi-property city (Hostel + Resort):** If the tool says multiple properties / asks which one — ask Hostel vs Resort (or named property). Do NOT pitch one property’s dorm rates as the whole city. After they pick Resort / premium / Suite, call lookup_hotel_availability **again** with hotel_name (e.g. "Resort" or full resort name) and room_name if they named a type. Speak only from that second result.\n`
-    : ''
-}- schedule_callback — only when they want a **later phone call** (busy). Never for product bookings that need capture_demo_lead.
+${pack.toolRules ? `${pack.toolRules}\n` : ''}- schedule_callback — only when they want a **later phone call** (busy). Never for product bookings that need capture_demo_lead.
 - update_demo_lead_name — after a booking was saved, if they correct the name.
-- end_call — after a brief goodbye when they clearly want to stop, DNC, wrong number, wrap limit, or thank-you after a **saved** booking.
+- end_call — after a brief goodbye when they clearly want to stop, DNC, wrong number, or wrap limit. A saved booking is NOT a hangup. After ok:true, restate the saved details and that the payment link will go on WhatsApp, then wait. end_call only if they then say thank you, bye, or bas.
 
 ${buildBookingPolicyPrompt(skills.booking)}
 
@@ -745,22 +776,28 @@ export function getKnownEmailDomains(skills: SkillsConfig): string[] {
 }
 
 export function compileSystemPrompt(agent: AgentInput): string {
-  const skills = mergeSkillsConfig(agent.skillsConfig);
+  const merged = mergeSkillsConfig(agent.skillsConfig);
+  const playbook = resolvePlaybook(agent.playbook, merged.booking);
+  const skills: SkillsConfig = { ...merged, booking: applyPlaybookToBooking(merged.booking, playbook) };
   const product = agent.productName;
   const languages = parseVoiceLanguages(agent.voiceLanguages);
   const gender: AgentGender = agent.agentGender === 'male' ? 'male' : 'female';
   const contactConfirm = buildContactConfirmPrompt(skills);
   const generalKnowledgeEnabled = agent.generalKnowledgeEnabled !== false;
+  const playbookSection = buildPlaybookPrompt(playbook);
+  const agentRules = buildAgentRulesPrompt(agent.agentRules);
 
   return `You are ${agent.name}, a consultative sales and support voice agent for ${product}.
 Persona: ${agent.persona}
-
+${agentRules ? `\n${agentRules}\n` : ''}
 ${buildLanguagePrompt(languages)}
 ${buildGenderPrompt(gender, languages)}
 ## Product Knowledge
 ${productKnowledgeForPrompt(agent)}
 
 ${buildPrinciplesPrompt(skills, product, agent.name, gender, generalKnowledgeEnabled)}
+
+${playbookSection}
 
 ${contactConfirm}
 
@@ -770,14 +807,14 @@ ${contactConfirm}
 - Comparison turns: one medium multi-point spoken reply covering Product Knowledge is allowed; do not read raw tables aloud.
 - **Price / amount / time / weight / height / age:** spell naturally in the active call language (English → "nine hundred fifty" / "ten lakh" / "forty-five"; Hinglish → "nau sau pachas" / "das lakh" / "paintalis"). Never digit-by-digit for weight/height/age (no "four five" for 45).
 - **Times follow language:** English → "two o'clock" / "2 PM" / "one thirty PM" / "ten lakh" (never "das" / "do baje"); Hinglish → "do baje" / "das baje" / "derh baje". Never mix (no "do baja" on an English call). Never write "1:00 PM" or say "colon".
-- **Phone, OTP, PIN:** ALWAYS English digit words ("one two three…"), even on Hinglish calls — never natural amounts like "nau sau" for these fields.
-- Specs like engine size: full words ("one litre" / "ek litre") — never "1.0", "point zero", or "dashamlav".
+- **Phone, OTP, PIN:** ALWAYS English digit words ("one two three…", "two two"), even on Hinglish calls — never "nau sau", and never "double"/"triple" (forbidden: "double two", "double three"). When a SYSTEM/tool gives a read-back string, speak it verbatim.
+- Decimal specs: full words ("one point five" / "derh") — never read "1.0" as "point zero" or "dashamlav".
 - ${mergeBookingPolicy(skills.booking).askEmail ? 'Confirm email when Booking policy requires it.' : 'Do not ask for or read back email on booking/demo/visit flows — book with email_skipped=true after phone confirm.'}
 - Opener is optional. Do not start every turn with Ji / Hmm / Theek hai / Achha. Ban empty hype ("Arre wah", "Haan haan", "Oh nice").
 - Respond only to the main caller. Ignore faint, distant, or side conversations in the background.
 - Stay silent when the caller is exploring ("hmm", "aise hai na") — speak only on clear questions. Hold ack: "${skills.runtime?.holdAckLine?.trim() || DEFAULT_RUNTIME.holdAckLine}" only — never narrate waiting.
 - Time-of-day greetings follow **Call time (IST)** — Good morning until 12 PM, Good afternoon until 3 PM, Good evening from 3 PM. Never mirror a wrong time-of-day greeting.
-- Relative dates (aaj/kal/parso/today/tomorrow/next week/next to next week + weekday): resolve using **Call time (IST)**, confirm both check-in and check-out with explicit calendar dates and month names, keep them in one coherent stay window, and reject past datetimes for demo/callback scheduling.`;
+- Relative dates (aaj/kal/parso/today/tomorrow/next week/next to next week + weekday): resolve using **Call time (IST)**, confirm the resolved date(s) with explicit calendar dates and month names, and reject past datetimes for scheduling.`;
 }
 
 export type CallDirection = 'inbound' | 'outbound';
@@ -833,9 +870,9 @@ export function buildOutboundOpenerInstructions(
     `Current IST is ${ist.clockLabel} (${ist.dayPart}) — open with **${ist.greetingEn}** (or Namaste). ` +
     'Never say Good morning after 12 PM IST. Never say Good afternoon after 3 PM IST — use Good evening. ' +
     'State WHY you called in the same breath (follow-up on their enquiry / help them choose). ' +
-    'Then permission ("Kya main aapse thodi der baat kar sakti/sakta hoon?") OR one discovery question — never sedan vs SUV vs budget as one opening menu. ' +
+    'Then one permission question ("Kya main aapse thodi der baat kar sakti/sakta hoon?"). ' +
     'Prefer "thodi der baat" — do NOT say "do minute milenge" or "2 minute". ' +
-    'One or two short sentences only, spoken naturally. ' +
+    'One short turn only, then stop and wait. Do not ask the city, trip, or a second question until the caller answers. ' +
     `Use the greeting style as a tone hint, not a script: "${agent.greeting}"`
   );
 }
@@ -981,6 +1018,9 @@ export {
   getIstNowParts,
   getIstCalendarParts,
   addIstCalendarDays,
+  daysFromMonday,
+  resolveIstWeekdayInWeek,
+  istWeekBounds,
   isTimeOfDayGreeting,
   buildRelativeDateRulesPrompt,
   buildCallTimeContextPrompt,
@@ -1158,6 +1198,15 @@ export {
 } from './phone-utils.js';
 
 export {
+  SILENCE_CHECK_COUNT,
+  SILENCE_CHECK_MS,
+  looksLikeHumanReply,
+  looksLikeVoicemailPrompt,
+  silenceStep,
+} from './phone-silence.js';
+export { callerAskedToEndCall } from './hangup-phrase.js';
+
+export {
   correctTranscriptForLlm,
   applyProductNameAliases,
   applySuvSttAliases,
@@ -1254,7 +1303,19 @@ export {
 } from './simulator2-instructions.js';
 
 export {
+  inrToEnglishWords,
+  latestSpokenName,
+  latestSpokenPhone,
+  spokenIntakeCorrection,
+  spokenToolLeakLine,
+} from './spoken-intake-guard.js';
+
+export {
   emptySimulator2TurnState,
+  FAKE_BOOKING_CORRECTION_LINE,
+  FAKE_BOOKING_CORRECTION_LINE_EN,
+  fakeBookingCorrectionLine,
+  looksLikeBookingConfirmedClaim,
   markBookingSaved,
   prepareSimulator2UserTurn,
   prepareUserTurn,
@@ -1315,16 +1376,24 @@ export {
   resolveHotelMatchForApi,
   toNexoraMatchArray,
   buildNexoraHotelMatch,
+  buildNexoraHotelKnown,
+  parseStayRoomTypeList,
   textMentionsKnownHotelCity,
   extractKnownHotelCityFromText,
+  extractKnownHotelCitiesFromText,
+  stayInventoryCities,
   hotelNameQueryCandidates,
   summarizeNexoraHotelFactsPayload,
   compactHotelFactsForLlm,
+  roomHasLiveRate,
   queryNexoraHotelFacts,
   resolveStayInventoryQuery,
   evaluateStayInventoryForBooking,
   assertLiveStayInventoryForBooking,
   matchStayRoom,
+  stayInventoryDateFromPreferredTime,
+  type NexoraHotelKnown,
+  type NexoraHotelKnownPayload,
   type NexoraHotelRoomSummary,
   type NexoraPropertyPolicies,
   type NexoraHotelFactsSummary,

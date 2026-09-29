@@ -5,12 +5,18 @@ import {
   hotelNameQueryCandidates,
   summarizeNexoraHotelFactsPayload,
   compactHotelFactsForLlm,
+  queryNexoraHotelFacts,
   evaluateStayInventoryForBooking,
   resolveStayInventoryQuery,
   resolveHotelMatchForApi,
   buildNexoraHotelMatch,
+  buildNexoraHotelKnown,
+  parseStayRoomTypeList,
   toNexoraMatchArray,
   extractKnownHotelCityFromText,
+  stayInventoryDateFromPreferredTime,
+  stayInventoryCities,
+  matchStayRoom,
 } from './nexora-hotel-facts.js';
 
 describe('summarizeNexoraHotelFactsPayload', () => {
@@ -89,12 +95,14 @@ describe('summarizeNexoraHotelFactsPayload', () => {
     assert.match(summary.spoken_hint, /6 Bed Mixed Dorm/i);
     assert.match(summary.spoken_hint, /Check-in\/out/i);
     assert.ok(summary.speak_now);
-    assert.match(summary.speak_now, /899|2999/);
+    assert.match(summary.speak_now, /Kaunsa room/i);
+    assert.doesNotMatch(summary.speak_now, /6 Bed Mixed Dorm|899|2999|percent off/i);
 
     const compact = compactHotelFactsForLlm(summary);
     assert.equal(compact.ok, true);
     assert.ok((compact.policies as Record<string, string>).check_in);
-    assert.equal(compact.spoken_to_caller, true);
+    assert.equal('spoken_to_caller' in compact, false);
+    assert.doesNotMatch(String(compact.rule), /ALREADY SPOKEN|were \(or will be\) spoken/i);
   });
 
   it('parses discount + check_in from related facts and multi-property cities', () => {
@@ -176,6 +184,91 @@ describe('summarizeNexoraHotelFactsPayload', () => {
   it('returns error when no matches', () => {
     const summary = summarizeNexoraHotelFactsPayload({ matches: [] });
     assert.equal(summary.ok, false);
+  });
+
+  it('merges Hostel + Resort rooms for multi-room prefer.rooms carts', () => {
+    const payload = {
+      matches: [
+        {
+          identity: {
+            city: 'Manali',
+            hotel_id: 'MOU-0063',
+            hotel_name: 'Moustache Manali',
+            property_type: 'Resort',
+            state: 'Himachal Pradesh',
+          },
+          related: [
+            {
+              identity: {
+                room_id: 'R-63-03',
+                room_name: 'Premium Suite',
+                room_type: 'Suite',
+              },
+              facts: {
+                available_rooms_beds: '4',
+                price_per_night: '7199',
+                discount: '20',
+              },
+            },
+          ],
+        },
+        {
+          identity: {
+            city: 'Manali',
+            hotel_id: 'MOU-0017',
+            hotel_name: 'Moustache Manali',
+            property_type: 'Hostel',
+            state: 'Himachal Pradesh',
+          },
+          related: [
+            {
+              identity: {
+                room_id: 'R-17-03',
+                room_name: 'Female Dorm',
+                room_type: 'Female Dormitory',
+              },
+              facts: {
+                available_rooms_beds: '9',
+                price_per_night: '1049',
+                discount: '25',
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    // Old bug: prefer.room = Female Dorm alone → Hostel only → Suite missing
+    const hostelOnly = summarizeNexoraHotelFactsPayload(payload, {
+      room: 'Female Dorm',
+    });
+    assert.equal(hostelOnly.ok, true);
+    if (!hostelOnly.ok) return;
+    assert.equal(hostelOnly.property_type, 'Hostel');
+    assert.equal(hostelOnly.rooms.length, 1);
+    const hostelGate = evaluateStayInventoryForBooking(hostelOnly, {
+      room_name: ['Female Dorm', 'Premium Suite'],
+    });
+    assert.equal(hostelGate.ok, false);
+
+    const merged = summarizeNexoraHotelFactsPayload(payload, {
+      rooms: ['Female Dorm', 'Premium Suite'],
+      room: 'Female Dorm',
+    });
+    assert.equal(merged.ok, true);
+    if (!merged.ok) return;
+    assert.match(merged.property_type ?? '', /Hostel/i);
+    assert.match(merged.property_type ?? '', /Resort/i);
+    assert.equal(merged.rooms.length, 2);
+    assert.ok(merged.rooms.some((r) => /Female Dorm/i.test(r.room_name)));
+    assert.ok(merged.rooms.some((r) => /Premium Suite/i.test(r.room_name)));
+
+    const gate = evaluateStayInventoryForBooking(merged, {
+      room_name: ['Female Dorm', 'Premium Suite'],
+    });
+    assert.equal(gate.ok, true);
+    if (!gate.ok) return;
+    assert.equal(gate.inventory_verified, true);
   });
 
   it('prefers Resort + Suite over Hostel dorms when booking hints are set', () => {
@@ -371,7 +464,8 @@ describe('summarizeNexoraHotelFactsPayload', () => {
     if (!summary.ok) return;
     assert.equal(summary.rooms.length, 2);
     assert.equal(summary.rooms[0]?.price_per_night, 699);
-    assert.match(summary.speak_now, /699|2499/);
+    assert.match(summary.speak_now, /Private Double Room|room/i);
+    assert.doesNotMatch(summary.speak_now, /699|2499|percent off/i);
   });
 
   it('marks inventory available and sold-out rooms separately', () => {
@@ -399,6 +493,92 @@ describe('summarizeNexoraHotelFactsPayload', () => {
     assert.match(summary.spoken_hint, /Sold out: Mountain\/Lake View Room/i);
     assert.match(summary.spoken_hint, /Policy fields not in live payload/i);
   });
+
+  it('surfaces browse-mode room names when price/beds are missing (Nexora city-only pack)', () => {
+    const summary = summarizeNexoraHotelFactsPayload({
+      served_need: 'browse',
+      matches: [
+        {
+          identity: {
+            city: 'Agra',
+            hotel_id: 'MOU-0011',
+            hotel_name: 'Moustache Agra',
+            property_type: 'Hostel',
+            state: 'Uttar Pradesh',
+          },
+          facts: {},
+          related: [
+            {
+              identity: { room_id: 'R-11-01', room_name: '6 Bed Mixed Dorm', room_type: 'Dormitory' },
+              facts: { city: 'Agra', status: 'Uttar Pradesh' },
+            },
+            {
+              identity: { room_id: 'R-11-02', room_name: '4 Bed Mixed Dorm', room_type: 'Dormitory' },
+              facts: { city: 'Agra', status: 'Uttar Pradesh' },
+            },
+            {
+              identity: { room_id: 'R-11-04', room_name: 'Private Double Room', room_type: 'Private' },
+              facts: { city: 'Agra', status: 'Uttar Pradesh' },
+            },
+          ],
+        },
+      ],
+    });
+    assert.equal(summary.ok, true);
+    if (!summary.ok) return;
+    assert.equal(summary.rooms.length, 3);
+    assert.ok(summary.rooms.every((r) => r.price_per_night === 0));
+    assert.match(summary.speak_now, /6 Bed Mixed Dorm/i);
+    assert.match(summary.speak_now, /date/i);
+    assert.doesNotMatch(summary.speak_now, /₹0/);
+    assert.match(summary.spoken_hint, /BROWSE/i);
+
+    const compact = compactHotelFactsForLlm(summary);
+    assert.equal(compact.ok, true);
+    assert.equal(compact.browse, true);
+    assert.match(String(compact.rule), /BROWSE/i);
+    assert.match(String(compact.rule), /no spoken date confirmation/i);
+    assert.ok(Array.isArray(compact.rooms));
+    assert.equal((compact.rooms as { name: string }[])[0]?.name, '4 Bed Mixed Dorm');
+
+    const gate = evaluateStayInventoryForBooking(summary, { room_name: 'Private Double Room' });
+    assert.equal(gate.ok, false);
+    assert.match(gate.error ?? '', /browse|rate/i);
+  });
+
+  it('reads price/available aliases from availability projection fields', () => {
+    const summary = summarizeNexoraHotelFactsPayload({
+      served_need: 'availability',
+      matches: [
+        {
+          identity: {
+            city: 'Agra',
+            hotel_id: 'MOU-0011',
+            hotel_name: 'Moustache Agra',
+            property_type: 'Hostel',
+          },
+          related: [
+            {
+              identity: { room_id: 'R-11-01', room_name: '6 Bed Mixed Dorm', room_type: 'Dormitory' },
+              facts: { price: '899', available: '7', discount: '10' },
+            },
+            {
+              identity: { room_id: 'R-11-04', room_name: 'Private Double Room', room_type: 'Private' },
+              facts: { price: '2999', available: '2', discount: '10' },
+            },
+          ],
+        },
+      ],
+    });
+    assert.equal(summary.ok, true);
+    if (!summary.ok) return;
+    assert.equal(summary.rooms.length, 2);
+    assert.equal(summary.rooms[0]!.price_per_night, 899);
+    assert.equal(summary.rooms[0]!.available_beds, 7);
+    assert.match(summary.speak_now, /Kaunsa room/i);
+    assert.doesNotMatch(summary.speak_now, /6 Bed Mixed Dorm|899|2999|percent off/i);
+    assert.doesNotMatch(summary.spoken_hint, /BROWSE/i);
+  });
 });
 
 describe('compactHotelFactsForLlm fallback', () => {
@@ -411,7 +591,6 @@ describe('compactHotelFactsForLlm fallback', () => {
     });
     assert.equal(compact.ok, false);
     assert.equal(compact.fallback_to_brain, true);
-    assert.equal(compact.spoken_to_caller, false);
     assert.match(String(compact.say), /Product Knowledge/i);
     assert.match(String(compact.rule), /FALLBACK/i);
   });
@@ -426,6 +605,16 @@ describe('compactHotelFactsForLlm fallback', () => {
     assert.equal(compact.fallback_to_brain, false);
     assert.match(String(compact.rule), /no match/i);
     assert.doesNotMatch(String(compact.rule), /FALLBACK/i);
+  });
+
+  it('does not tell the model to ask the city again when no city was passed', async () => {
+    const result = await queryNexoraHotelFacts('');
+    const compact = compactHotelFactsForLlm(result);
+    assert.equal(compact.ok, false);
+    assert.match(String(compact.error), /city or state is required/);
+    assert.match(String(compact.say), /Kaunsi city ya state/);
+    assert.doesNotMatch(String(compact.say), /Ask which city/i);
+    assert.match(String(compact.rule), /stay silent/i);
   });
 });
 
@@ -480,6 +669,66 @@ describe('evaluateStayInventoryForBooking', () => {
     assert.equal(gate.inventory_verified, true);
     assert.equal(gate.room?.name, 'Garden View Room');
     assert.equal(gate.room?.free, 2);
+  });
+
+  it('allows multi-room carts when every type is available', () => {
+    const multiRooms = [
+      {
+        room_id: '1',
+        room_name: '6 Bed Mixed Dorm',
+        room_type: 'Dormitory',
+        available_beds: 7,
+        price_per_night: 899,
+        discount_pct: 5,
+      },
+      {
+        room_id: '2',
+        room_name: '4 Bed Mixed Dorm',
+        room_type: 'Dormitory',
+        available_beds: 16,
+        price_per_night: 999,
+        discount_pct: 5,
+      },
+      {
+        room_id: '3',
+        room_name: 'Female Dorm',
+        room_type: 'Dormitory',
+        available_beds: 27,
+        price_per_night: 1249,
+        discount_pct: 5,
+      },
+      {
+        room_id: '4',
+        room_name: 'Private Double Room',
+        room_type: 'Private',
+        available_beds: 3,
+        price_per_night: 2999,
+        discount_pct: 5,
+      },
+    ];
+    const gate = evaluateStayInventoryForBooking(
+      {
+        ok: true as const,
+        hotel_name: 'Moustache Jaipur',
+        city: 'Jaipur',
+        policies: {},
+        rooms: multiRooms,
+        spoken_hint: 'hint',
+        speak_now: 'speak',
+      },
+      {
+        room_name:
+          '6 Bed Mixed Dorm + 2x 4 Bed Mixed Dorm + Female Dorm + 2x Private Double Room',
+      },
+    );
+    assert.equal(gate.ok, true);
+    if (!gate.ok) return;
+    assert.equal(gate.inventory_verified, true);
+    assert.equal(
+      gate.room?.name,
+      '6 Bed Mixed Dorm, 4 Bed Mixed Dorm, Female Dorm, Private Double Room',
+    );
+    assert.equal(gate.room?.price, 899 + 999 + 1249 + 2999);
   });
 
   it('blocks when property has zero free beds', () => {
@@ -606,5 +855,153 @@ describe('buildNexoraHotelMatch / resolveHotelMatchForApi', () => {
       city: ['Jaipur'],
     });
     assert.equal(toNexoraMatchArray(['', '  ']), undefined);
+  });
+});
+
+describe('parseStayRoomTypeList', () => {
+  it('splits multi-room carts and strips 2x quantity prefixes', () => {
+    assert.deepEqual(
+      parseStayRoomTypeList(
+        '6 Bed Mixed Dorm + 2x 4 Bed Mixed Dorm + Female Dorm + 2x Private Double Room',
+      ),
+      [
+        '6 Bed Mixed Dorm',
+        '4 Bed Mixed Dorm',
+        'Female Dorm',
+        'Private Double Room',
+      ],
+    );
+  });
+
+  it('accepts arrays and dedupes', () => {
+    assert.deepEqual(
+      parseStayRoomTypeList([
+        '6 Bed Mixed Dorm',
+        '4 Bed Mixed Dorm',
+        'Female Dorm',
+        'Private Double Room',
+        '6 Bed Mixed Dorm',
+      ]),
+      [
+        '6 Bed Mixed Dorm',
+        '4 Bed Mixed Dorm',
+        'Female Dorm',
+        'Private Double Room',
+      ],
+    );
+  });
+});
+
+describe('buildNexoraHotelKnown', () => {
+  it('always sends all known keys like Postman (empty string when unset)', () => {
+    assert.deepEqual(buildNexoraHotelKnown({ state: 'Goa' }), {
+      state: 'Goa',
+      city: '',
+      date: '',
+      room_type: '',
+      price_per_night: '',
+    });
+    assert.deepEqual(
+      buildNexoraHotelKnown({
+        state: 'rajasthan',
+        city: 'jaipur',
+        room_type: 'Female Dormitory',
+        date: '2026-04-25',
+        price_per_night: '',
+      }),
+      {
+        state: 'rajasthan',
+        city: ['jaipur'],
+        date: '2026-04-25',
+        room_type: ['Female Dormitory'],
+        price_per_night: '',
+      },
+    );
+  });
+
+  it('sends city as a string array, including two cities, and omits room_type when unset', () => {
+    assert.deepEqual(
+      buildNexoraHotelKnown({
+        city: ['Mussoorie', 'Rishikesh'],
+        date: '2026-10-01',
+      }),
+      {
+        state: '',
+        city: ['Mussoorie', 'Rishikesh'],
+        date: '2026-10-01',
+        room_type: '',
+        price_per_night: '',
+      },
+    );
+  });
+
+  it('sends multi-room carts as room_type string[]', () => {
+    assert.deepEqual(
+      buildNexoraHotelKnown({
+        city: 'Jaipur',
+        date: '2026-10-02',
+        room_type:
+          '6 Bed Mixed Dorm + 2x 4 Bed Mixed Dorm + Female Dorm + 2x Private Double Room',
+      }),
+      {
+        state: '',
+        city: ['Jaipur'],
+        date: '2026-10-02',
+        room_type: [
+          '6 Bed Mixed Dorm',
+          '4 Bed Mixed Dorm',
+          'Female Dorm',
+          'Private Double Room',
+        ],
+        price_per_night: '',
+      },
+    );
+  });
+});
+
+describe('stayInventoryCities', () => {
+  it('collects every named city for the confirm payload', () => {
+    assert.deepEqual(
+      stayInventoryCities({
+        city: 'Mussoorie',
+        hotel_name: 'Moustache Mussoorie and Moustache Rishikesh',
+        notes: 'Dates: Mussoorie Oct 1 to Oct 3, Rishikesh Oct 3 to Oct 5.',
+      }),
+      ['Mussoorie', 'Rishikesh'],
+    );
+  });
+
+  it('keeps a single city as a one-element list source', () => {
+    assert.deepEqual(stayInventoryCities({ city: 'Jaipur' }), ['Jaipur']);
+  });
+});
+
+describe('matchStayRoom number words', () => {
+  it('matches Six Bed Mixed Dorm to the live 6 Bed name', () => {
+    const room = matchStayRoom(
+      [
+        {
+          room_id: '1',
+          room_name: '6 Bed Mixed Dorm',
+          available_beds: 6,
+          price_per_night: 699,
+          discount_pct: 0,
+        },
+      ],
+      'Six Bed Mixed Dorm',
+    );
+    assert.equal(room?.room_name, '6 Bed Mixed Dorm');
+  });
+});
+
+describe('stayInventoryDateFromPreferredTime', () => {
+  it('extracts YYYY-MM-DD from preferred_time for capture inventory gate', () => {
+    assert.equal(stayInventoryDateFromPreferredTime('2026-10-02'), '2026-10-02');
+    assert.equal(
+      stayInventoryDateFromPreferredTime('check-in 2026-10-02 afternoon'),
+      '2026-10-02',
+    );
+    assert.equal(stayInventoryDateFromPreferredTime('tomorrow 5 PM'), undefined);
+    assert.equal(stayInventoryDateFromPreferredTime(''), undefined);
   });
 });

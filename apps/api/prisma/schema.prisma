@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -12,27 +12,31 @@ model Agent {
   name                  String
   greeting              String
   persona               String   @default("friendly and professional")
-  productName           String   @default("Cronberry CRM")
+  productName           String   @default("")
   voiceId               String
   voiceLanguage         String   @default("en")
   voiceLanguages        String   @default("en,hi,hinglish")
   voiceSpeed            Float    @default(1.0)
   voicePitch            Float    @default(1.0)
-  ttsModel              String   @default("sonic-3.5")
+  ttsModel              String   @default("gemini")
   ttsSampleRate         Int      @default(24000)
   ttsEmotion            String   @default("")
-  voicePipeline         String   @default("cascaded")
-  realtimeVoice         String   @default("marin")
-  /** Full OpenAI Realtime / Gemini Live S2S user config (model, VAD, language, etc.). */
+  voicePipeline         String   @default("gemini_live")
+  realtimeVoice         String   @default("Kore")
+  /** Full Gemini Live S2S user config (model, VAD, language, etc.). */
   realtimeS2sConfig     Json?
   agentGender           String   @default("female")
   llmProvider           String   @default("gpt")
   llmModel              String   @default("gpt-5.4-mini")
-  sttProvider           String   @default("azure")
+  sttProvider           String   @default("none")
   sttModel              String   @default("")
   brainMarkdown         String
   brainSummary          String   @default("")
   brainLearnings        String   @default("")
+  /// Short always-on client guardrails — kept out of brainMarkdown so large-brain search never hides them.
+  agentRules            String   @default("")
+  /// Sales playbook JSON (how to sell: goal, fields, discovery, do-nots). Null → derived from booking policy.
+  playbook              Json?
   learningsEnabled      Boolean  @default(true)
   generalKnowledgeEnabled Boolean @default(true)
   skillsConfig          Json
@@ -47,6 +51,23 @@ model Agent {
   globalLearningVectors GlobalLearningVector[]
   prospectMemories      ProspectMemory[]
   availabilityRules     AvailabilityRules?
+  knowledgeChunks       ProductKnowledgeChunk[]
+}
+
+/// Searchable slices of brainMarkdown (search_product_knowledge tool). Rebuilt when the Brain changes.
+model ProductKnowledgeChunk {
+  id         String   @id @default(uuid())
+  agentId    String
+  agent      Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  position   Int
+  heading    String   @default("")
+  content    String
+  /// JSON number[]; null when embeddings were unavailable (keyword search still works).
+  embedding  Json?
+  sourceHash String
+  createdAt  DateTime @default(now())
+
+  @@index([agentId, position])
 }
 
 model BrainMutation {
@@ -137,6 +158,8 @@ model Lead {
   productInterest    String?
   location           String?
   locationType       String    @default("showroom")
+  /// Playbook fields collected on the call (budget, crop, property_type, …).
+  details            Json      @default("{}")
   source             String    @default("voice_inbound")
   googleEventId      String?
   calendarSyncStatus String    @default("pending")

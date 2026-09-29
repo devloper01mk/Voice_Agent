@@ -55,7 +55,8 @@ describe('ingestPhoneUtterance', () => {
     state = r.state;
     assert.equal(state.digits, '8306446999');
     assert.equal(r.kind, 'complete');
-    assert.match(r.systemNote, /eight three|Read back/i);
+    assert.match(r.systemNote, /eight three|Speak these digit words VERBATIM/i);
+    assert.match(r.systemNote, /Never say double\/triple/i);
   });
 
   it('patches leading missing digit without full reset', () => {

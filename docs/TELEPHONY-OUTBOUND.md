@@ -39,8 +39,8 @@ LIVEKIT_URL=wss://your-project.livekit.cloud
 LIVEKIT_API_KEY=...
 LIVEKIT_API_SECRET=...
 LIVEKIT_SIP_OUTBOUND_TRUNK=ST_xxxxxxxx
-# Optional caller ID presented on the trunk
-# LIVEKIT_SIP_FROM_NUMBER=9198xxxxxxxx
+# Optional caller ID presented on the trunk — E.164, leading `+` required by Tata/Smartflo
+# LIVEKIT_SIP_FROM_NUMBER=+9198xxxxxxxx
 GEMINI_API_KEY=...   # if using gemini_live
 API_URL=http://localhost:3001
 # Optional: keep gemini-3.1 on phone (opener/tool speak weaker — default remaps to 2.5)

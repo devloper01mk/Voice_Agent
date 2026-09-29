@@ -49,7 +49,7 @@ describe('simple-explain (product-agnostic)', () => {
       productName: 'Widget Pro',
       voiceId: 'v',
       voiceSpeed: 1,
-      llmProvider: 'groq',
+      llmProvider: 'gpt',
       llmModel: 'x',
       brainMarkdown: 'Widget Pro starts at 499.',
       skillsConfig: mergeSkillsConfig(null),

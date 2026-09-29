@@ -30,7 +30,7 @@ export const DEFER_BOOKING_STICKY_TURNS = 3;
 
 /**
  * Caller explicitly wants info / facilities / sightseeing first — stop booking funnel.
- * Covers the Moustache-style correction: "hamesha booking pe kyun jaate ho".
+ * Covers corrections like "hamesha booking pe kyun jaate ho".
  */
 const DEFER_BOOKING_ASK =
   /\b(?:pehle\s+(?:bata(?:o|iye|na)|jawab|detail|details|facilities?|facility|suniye|suno)|booking\s+(?:se\s+)?pehle|pehle\s+(?:meri?\s+)?(?:pasand|baat)|hamesha\s+booking|booking\s+(?:par|pe|mein)\s+(?:kyun|kyu|mat)|mat\s+(?:jao|jaao|jaana)\s+booking|don'?t\s+(?:push|jump\s+to)\s+booking|stop\s+(?:pushing\s+)?booking|answer\s+first|facilities?\s+(?:pehle|bata)|ghumne\s+(?:ki\s+)?jagah|sightseeing\s+first|last\s+mein\s+booking)\b|पहले\s*(?:बताओ|बताइए|जवाब|डिटेल)|बुकिंग\s*(?:से\s*)?पहले|हमेशा\s*बुकिंग|बुकिंग\s*(?:पर|पे)\s*(?:क्यों|मत)|फैसिलिटी|घूमने\s*की\s*जगह/i;

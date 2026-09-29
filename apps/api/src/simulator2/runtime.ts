@@ -1,18 +1,19 @@
 import { Router } from 'express';
 import {
+  applyPlaybookToSkills,
+  resolvePlaybook,
   buildGlobalLearningRetrievalQuery,
   compileSystemPrompt,
   mergeSkillsConfig,
-  normalizeSttProvider,
   normalizeVoicePipeline,
   prospectKeyFromName,
   resolveCallLlm,
   resolveRealtimeVoice,
-  resolveSttModel,
   type SkillsConfig,
 } from '@vsa/shared';
 import { prisma } from '../db.js';
 import { resolveKnownContact } from '../known-contact.js';
+import { productKnowledgeToolPayload, searchProductKnowledge } from '../product-knowledge.js';
 import {
   backfillGlobalLearningsFromText,
   countGlobalLearningVectors,
@@ -23,6 +24,21 @@ import {
 const SIMULATOR2_LEARNING_LIMIT = 3;
 
 export const simulator2RuntimeRouter = Router();
+
+simulator2RuntimeRouter.post('/:id/knowledge-search', async (req, res) => {
+  const query = typeof req.body?.query === 'string' ? req.body.query : '';
+  const limit = Math.min(8, Math.max(1, Number(req.body?.limit) || 4));
+  try {
+    const result = await searchProductKnowledge(req.params.id, query, limit);
+    console.info(
+      `[product-knowledge] search agent=${req.params.id} mode=${result.mode} found=${result.found} ${result.latency_ms}ms q=${JSON.stringify(query.slice(0, 80))}`,
+    );
+    res.json(productKnowledgeToolPayload(result));
+  } catch (err) {
+    console.warn('[product-knowledge] search failed:', err instanceof Error ? err.message : err);
+    res.status(500).json({ ok: false, error: 'Product knowledge search failed' });
+  }
+});
 
 simulator2RuntimeRouter.get('/:id/runtime', async (req, res) => {
   const agent = await prisma.agent.findUnique({ where: { id: req.params.id } });
@@ -35,7 +51,10 @@ simulator2RuntimeRouter.get('/:id/runtime', async (req, res) => {
   const contactEmail =
     typeof req.query.contactEmail === 'string' ? req.query.contactEmail : undefined;
 
-  const skillsConfig = mergeSkillsConfig(agent.skillsConfig as unknown as SkillsConfig);
+  const skillsConfig = applyPlaybookToSkills(
+    mergeSkillsConfig(agent.skillsConfig as unknown as SkillsConfig),
+    agent.playbook,
+  );
   const memory = await resolveKnownContact(
     agent.id,
     {
@@ -100,11 +119,13 @@ simulator2RuntimeRouter.get('/:id/runtime', async (req, res) => {
     voiceLanguages: agent.voiceLanguages,
     voiceSpeed: agent.voiceSpeed,
     agentGender: agent.agentGender === 'male' ? 'male' : 'female',
-    llmProvider: agent.llmProvider === 'groq' ? 'groq' : 'gpt',
+    llmProvider: 'gpt',
     llmModel: agent.llmModel,
     brainMarkdown: agent.brainMarkdown,
     brainSummary: agent.brainSummary,
     generalKnowledgeEnabled,
+    agentRules: agent.agentRules,
+    playbook: agent.playbook,
     skillsConfig,
   });
 
@@ -125,25 +146,20 @@ simulator2RuntimeRouter.get('/:id/runtime', async (req, res) => {
     realtimeVoice: resolveRealtimeVoice(agent.realtimeVoice),
     llmProvider: callLlm.provider,
     llmModel: callLlm.model,
-    sttProvider: normalizeSttProvider(agent.sttProvider),
-    sttModel: resolveSttModel(
-      normalizeSttProvider(agent.sttProvider),
-      agent.sttModel,
-    ),
+    sttProvider: 'none',
+    sttModel: '',
     simulatorRuntime: {
       llmProvider: callLlm.provider,
       llmModel: callLlm.model,
       studioLlmProvider: agent.llmProvider,
       studioLlmModel: agent.llmModel,
-      studioSttProvider: normalizeSttProvider(agent.sttProvider),
-      studioSttModel: resolveSttModel(
-        normalizeSttProvider(agent.sttProvider),
-        agent.sttModel,
-      ),
+      studioSttProvider: 'none',
+      studioSttModel: '',
       voicePipeline: normalizeVoicePipeline(agent.voicePipeline),
       realtimeVoice: resolveRealtimeVoice(agent.realtimeVoice),
     },
     agentGender: agent.agentGender,
+    playbook: resolvePlaybook(agent.playbook, skillsConfig.booking),
     compiledSystemPrompt,
     brainSummary: agent.brainSummary,
     generalKnowledgeEnabled,

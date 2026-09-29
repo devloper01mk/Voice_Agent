@@ -1,26 +1,20 @@
 import {
+  AGENT_RULES_MAX_CHARS,
+  applyPlaybookTemplate,
+  normalizePlaybook,
+  resolvePlaybook,
+  type SalesPlaybook,
   DEFAULT_SKILLS,
-  DEFAULT_GOOGLE_STT_MODEL,
-  DEFAULT_OPENAI_STT_MODEL,
-  DEFAULT_REALTIME_VOICE,
+  DEFAULT_GEMINI_LIVE_VOICE,
   DEFAULT_VOICE_PIPELINE,
-  GOOGLE_STT_MODEL_OPTIONS,
-  OPENAI_STT_MODEL_OPTIONS,
-  SARVAM_STT_MODEL_OPTIONS,
   defaultGeminiLiveS2sUserConfig,
-  defaultRealtimeS2sUserConfig,
-  defaultSttModel,
   isS2sPipeline,
   mergeSkillsConfig,
   normalizeRealtimeS2sUserConfig,
-  normalizeSttProvider,
   normalizeVoicePipeline,
   resolveGeminiLiveVoice,
-  resolveRealtimeVoice,
-  resolveSttModel,
   type RealtimeS2sUserConfig,
   type SkillsConfig,
-  type SttProvider,
   type VoicePipeline,
 } from '@vsa/shared';
 import { useEffect, useMemo, useState } from 'react';
@@ -28,14 +22,11 @@ import RealtimeS2sSettingsForm from '../components/RealtimeS2sSettingsForm';
 import { BrainVisualization } from '../components/studio/BrainVisualization';
 import CalendarAvailabilityPanel from '../components/studio/CalendarAvailabilityPanel';
 import { SkillsEditor } from '../components/studio/SkillsEditor';
+import { PlaybookPanel } from '../components/studio/PlaybookPanel';
 import {
   type Agent,
   type BrainMutation,
-  type CartesiaVoice,
   type ProspectMemory,
-  type TtsEmotion,
-  type TtsModel,
-  type TtsSampleRate,
   approveMutation,
   clearBrainLearnings,
   createAgent,
@@ -45,24 +36,9 @@ import {
   listLearningAudit,
   listPendingMutations,
   listProspectMemories,
-  listTtsEmotions,
-  listTtsModels,
-  listTtsSampleRates,
-  listTtsVoices,
-  previewTts,
   rejectMutation,
   updateAgent,
 } from '../api';
-
-const DEFAULT_VOICE =
-  import.meta.env.VITE_CARTESIA_VOICE_ID ?? '95d51f79-c397-46f9-b49a-23763d3eaa2d';
-
-const PREVIEW_SAMPLES = {
-  en: "Hi, I'm your Cronberry sales assistant. This is how I'll sound on a call.",
-  hi: 'नमस्ते, मैं क्रॉनबेरी से माया बोल रही हूँ। क्या आप सेल्स पाइपलाइन के बारे में जानना चाहेंगे?',
-  hinglish:
-    "Hi, main Maya bol rehi hoon Cronberry se. Aap apni sales pipeline manage karna chahte hain?",
-};
 
 type SpeakLang = 'en' | 'hi' | 'hinglish';
 
@@ -101,11 +77,8 @@ When the caller asks pricing, name these tiers in one sentence, then offer a qui
 - Competitor pricing unless listed here
 `;
 
-function voiceGenderToAgent(gender: string): 'female' | 'male' {
-  return /feminine|female/i.test(gender) ? 'female' : 'male';
-}
 
-type Tab = 'identity' | 'voice' | 'brain' | 'skills' | 'calendar' | 'learnings' | 'llm' | 'stt';
+type Tab = 'identity' | 'voice' | 'brain' | 'playbook' | 'skills' | 'calendar' | 'learnings' | 'llm';
 
 function isSkillsConfig(raw: unknown): raw is SkillsConfig {
   return (
@@ -121,7 +94,6 @@ function normalizeSkillsConfig(raw: unknown): SkillsConfig {
 }
 
 const DEFAULT_GPT_MODEL = 'gpt-5.4-mini';
-const DEFAULT_GROQ_MODEL = 'llama-3.3-70b-versatile';
 
 const GPT_MODEL_OPTIONS = [
   {
@@ -140,80 +112,15 @@ const GPT_MODEL_OPTIONS = [
   },
 ] as const;
 
-const LLM_PROVIDERS = [
-  {
-    id: 'groq' as const,
-    label: 'Groq',
-    badge: 'Ultra fast',
-    badgeTone: 'green' as const,
-    description: 'Optimized for real-time voice — minimal time-to-first-token on calls.',
-    icon: '⚡',
-    model: DEFAULT_GROQ_MODEL,
-    apiEnv: 'GROQ_API_KEY',
-  },
-  {
-    id: 'gpt' as const,
-    label: 'OpenAI GPT',
-    badge: 'Best quality',
-    badgeTone: 'blue' as const,
-    description: 'Stronger reasoning for complex objections, pricing, and product Q&A.',
-    icon: '✨',
-    apiEnv: 'OPENAI_API_KEY',
-  },
-] as const;
-
-const STT_PROVIDERS = [
-  {
-    id: 'azure' as const,
-    label: 'Azure Speech',
-    badge: 'Default',
-    badgeTone: 'green' as const,
-    description:
-      'Current production STT — multilingual en/hi, phrase boosting, and email-capture tuning.',
-    icon: '🎙️',
-    apiEnv: 'AZURE_SPEECH_KEY',
-  },
-  {
-    id: 'sarvam' as const,
-    label: 'Sarvam Saaras',
-    badge: 'Indian STT',
-    badgeTone: 'blue' as const,
-    description:
-      'Saaras v3/v4 — 22 Indian languages, Hinglish code-mix, noisy phone calls (SARVAM_API_KEY).',
-    icon: '🇮🇳',
-    apiEnv: 'SARVAM_API_KEY',
-  },
-  {
-    id: 'google' as const,
-    label: 'Google Cloud STT',
-    badge: 'Chirp',
-    badgeTone: 'blue' as const,
-    description:
-      'Chirp 2/3 via Speech v2 — multilingual en/hi on asia-south1 (GOOGLE_APPLICATION_CREDENTIALS).',
-    icon: '☁️',
-    apiEnv: 'GOOGLE_APPLICATION_CREDENTIALS',
-  },
-  {
-    id: 'openai' as const,
-    label: 'OpenAI STT',
-    badge: 'Simulator',
-    badgeTone: 'gray' as const,
-    description:
-      'OpenAI realtime transcription for Simulator 2.0 cascaded calls (OPENAI_API_KEY). Phone uses Azure unless Sarvam is selected.',
-    icon: '🌐',
-    apiEnv: 'OPENAI_API_KEY',
-  },
-] as const;
-
 const STUDIO_TABS = [
   { id: 'identity' as Tab, label: 'Identity', icon: '👤' },
   { id: 'voice' as Tab, label: 'Voice', icon: '🎤' },
   { id: 'brain' as Tab, label: 'Brain', icon: '🧠' },
+  { id: 'playbook' as Tab, label: 'Playbook', icon: '🎯' },
   { id: 'skills' as Tab, label: 'Skills', icon: '📋' },
   { id: 'calendar' as Tab, label: 'Calendar', icon: '📅' },
   { id: 'learnings' as Tab, label: 'Learnings', icon: '📚' },
   { id: 'llm' as Tab, label: 'LLM', icon: '✨' },
-  { id: 'stt' as Tab, label: 'STT', icon: '🎧' },
 ] as const;
 
 const SPEAK_LANG_OPTIONS = [
@@ -228,23 +135,31 @@ const defaultForm = () => ({
     "Hi, main Maya bol rehi hoon Cronberry CRM se. Aap batayein — aaj features, pricing, ya demo mein se kya dekhna chahenge?",
   persona: 'friendly and professional female sales agent',
   productName: 'Cronberry CRM',
-  voiceId: DEFAULT_VOICE,
+  voiceId: DEFAULT_GEMINI_LIVE_VOICE as string,
   voiceLanguage: 'en',
   voiceLanguages: 'en,hi,hinglish',
   voiceSpeed: 1,
   voicePitch: 1,
-  ttsModel: 'sonic-3.6',
+  ttsModel: 'gemini',
   ttsSampleRate: 24000,
   ttsEmotion: '',
   voicePipeline: DEFAULT_VOICE_PIPELINE as VoicePipeline,
-  realtimeVoice: DEFAULT_REALTIME_VOICE,
+  realtimeVoice: DEFAULT_GEMINI_LIVE_VOICE as string,
   agentGender: 'female' as 'female' | 'male',
-  llmProvider: 'gpt' as 'groq' | 'gpt',
+  llmProvider: 'gpt' as const,
   llmModel: DEFAULT_GPT_MODEL,
-  sttProvider: 'azure' as SttProvider,
-  sttModel: '',
   brainMarkdown: DEFAULT_BRAIN,
+  agentRules: '',
 });
+
+/** Brain headings that look like behaviour rules — they belong in Agent rules, not searchable facts. */
+function ruleLikeBrainHeadings(markdown: string): string[] {
+  return markdown
+    .split(/\r?\n/)
+    .map((line) => /^#{1,4}\s+(.+)$/.exec(line)?.[1]?.trim())
+    .filter((h): h is string => Boolean(h) && /\b(rules?|lock|never|priority|flow|must|do not|don't|forbidden|identity)\b/i.test(h!))
+    .slice(0, 8);
+}
 
 export default function StudioPage() {
   const [agents, setAgents] = useState<{ id: string; name: string }[]>([]);
@@ -252,22 +167,22 @@ export default function StudioPage() {
   const [tab, setTab] = useState<Tab>('identity');
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
-  const [previewing, setPreviewing] = useState(false);
-
-  const [previewLang, setPreviewLang] = useState<SpeakLang>('hinglish');
-  const [ttsModels, setTtsModels] = useState<TtsModel[]>([]);
-  const [ttsSampleRates, setTtsSampleRates] = useState<TtsSampleRate[]>([]);
-  const [ttsEmotions, setTtsEmotions] = useState<TtsEmotion[]>([]);
-  const [voices, setVoices] = useState<CartesiaVoice[]>([]);
-  const [voicesLoading, setVoicesLoading] = useState(false);
 
   const [form, setForm] = useState(defaultForm());
   const [realtimeS2sConfig, setRealtimeS2sConfig] = useState<RealtimeS2sUserConfig>(
-    defaultRealtimeS2sUserConfig(),
+    defaultGeminiLiveS2sUserConfig(),
   );
   const [brainSummary, setBrainSummary] = useState('');
   const [brainLearnings, setBrainLearnings] = useState('');
   const [skillsConfig, setSkillsConfig] = useState<SkillsConfig>(DEFAULT_SKILLS);
+  /** Stored playbook (null = derived from Booking policy). `playbookCleared` → send null on save. */
+  const [storedPlaybook, setStoredPlaybook] = useState<SalesPlaybook | null>(null);
+  const [playbookCleared, setPlaybookCleared] = useState(false);
+  const playbook = useMemo(
+    () => storedPlaybook ?? resolvePlaybook(null, skillsConfig.booking),
+    [storedPlaybook, skillsConfig.booking],
+  );
+  const playbookPayload = storedPlaybook ?? (playbookCleared ? null : undefined);
   const [learningsEnabled, setLearningsEnabled] = useState(true);
   const [generalKnowledgeEnabled, setGeneralKnowledgeEnabled] = useState(true);
   const [pendingMutations, setPendingMutations] = useState<BrainMutation[]>([]);
@@ -298,40 +213,31 @@ export default function StudioPage() {
           greeting: a.greeting,
           persona: a.persona,
           productName: a.productName,
-          voiceId: a.voiceId,
+          voiceId: resolveGeminiLiveVoice(a.realtimeVoice ?? a.voiceId),
           voiceLanguage: a.voiceLanguage ?? 'en',
           voiceLanguages: a.voiceLanguages ?? 'en,hi,hinglish',
           voiceSpeed: a.voiceSpeed,
           voicePitch: a.voicePitch ?? 1,
-          ttsModel: a.ttsModel ?? 'sonic-3.6',
-          ttsSampleRate: a.ttsSampleRate ?? 24000,
-          ttsEmotion: a.ttsEmotion ?? '',
+          ttsModel: 'gemini',
+          ttsSampleRate: 24000,
+          ttsEmotion: '',
           voicePipeline: normalizeVoicePipeline(a.voicePipeline),
-          realtimeVoice:
-            normalizeVoicePipeline(a.voicePipeline) === 'gemini_live'
-              ? resolveGeminiLiveVoice(a.realtimeVoice)
-              : resolveRealtimeVoice(a.realtimeVoice),
+          realtimeVoice: resolveGeminiLiveVoice(a.realtimeVoice),
           agentGender: a.agentGender === 'male' ? 'male' : 'female',
-          llmProvider: a.llmProvider,
+          llmProvider: 'gpt',
           llmModel: a.llmModel,
-          sttProvider: normalizeSttProvider(a.sttProvider),
-          sttModel: resolveSttModel(
-            normalizeSttProvider(a.sttProvider),
-            a.sttModel,
-          ),
           brainMarkdown: a.brainMarkdown,
+          agentRules: a.agentRules ?? '',
         });
-        const pipeline = normalizeVoicePipeline(a.voicePipeline);
         setRealtimeS2sConfig(
           normalizeRealtimeS2sUserConfig(
             {
               ...(a.realtimeS2sConfig ?? {}),
-              voice:
-                pipeline === 'gemini_live'
-                  ? resolveGeminiLiveVoice(a.realtimeS2sConfig?.voice ?? a.realtimeVoice)
-                  : resolveRealtimeVoice(a.realtimeS2sConfig?.voice ?? a.realtimeVoice),
+              voice: resolveGeminiLiveVoice(
+                a.realtimeS2sConfig?.voice ?? a.realtimeVoice,
+              ),
             },
-            pipeline,
+            'gemini_live',
           ),
         );
         setBrainSummary(a.brainSummary ?? '');
@@ -339,32 +245,12 @@ export default function StudioPage() {
         setLearningsEnabled(a.learningsEnabled !== false);
         setGeneralKnowledgeEnabled(a.generalKnowledgeEnabled !== false);
         setSkillsConfig(normalizeSkillsConfig(a.skillsConfig));
+        setStoredPlaybook(normalizePlaybook(a.playbook));
+        setPlaybookCleared(false);
       })
       .catch(() => setMessage('Failed to load agent'));
   }, [agentId]);
 
-  useEffect(() => {
-    if (tab !== 'voice') return;
-    setVoicesLoading(true);
-
-    Promise.all([
-      listTtsModels(),
-      listTtsSampleRates(),
-      listTtsEmotions(),
-      listTtsVoices(),
-    ])
-      .then(([models, rates, emotions, list]) => {
-        setTtsModels(models);
-        setTtsSampleRates(rates);
-        setTtsEmotions(emotions);
-        setVoices(list);
-        if (list.length && !list.some((v) => v.id === form.voiceId)) {
-          setForm((f) => ({ ...f, voiceId: list[0]!.id }));
-        }
-      })
-      .catch(() => setMessage('Failed to load TTS settings — check CARTESIA_API_KEY.'))
-      .finally(() => setVoicesLoading(false));
-  }, [tab]);
 
   const loadLearnings = async () => {
     if (!agentId) return;
@@ -395,11 +281,6 @@ export default function StudioPage() {
     void loadLearnings();
   }, [tab, agentId]);
 
-  useEffect(() => {
-    if (!speakLanguages.includes(previewLang) && speakLanguages[0]) {
-      setPreviewLang(speakLanguages[0]);
-    }
-  }, [speakLanguages, previewLang]);
 
   const save = async () => {
     setSaving(true);
@@ -416,6 +297,7 @@ export default function StudioPage() {
           learningsEnabled,
           generalKnowledgeEnabled,
           skillsConfig,
+          playbook: playbookPayload,
         });
       } else {
         saved = await createAgent({
@@ -427,18 +309,21 @@ export default function StudioPage() {
           learningsEnabled,
           generalKnowledgeEnabled,
           skillsConfig,
+          playbook: storedPlaybook ?? undefined,
         });
         setAgentId(saved.id);
         const list = await listAgents();
         setAgents(list);
       }
       setMessage(
-        `Saved. Brain summarized with ${form.llmProvider === 'groq' ? 'Groq' : 'GPT'}. Prompt ~${saved.promptTokenCount ?? '?'} tokens.`,
+        `Saved. Brain summarized with GPT. Prompt ~${saved.promptTokenCount ?? '?'} tokens.`,
       );
       setBrainSummary(saved.brainSummary ?? '');
       setBrainLearnings(saved.brainLearnings ?? '');
       setGeneralKnowledgeEnabled(saved.generalKnowledgeEnabled !== false);
       setSkillsConfig(normalizeSkillsConfig(saved.skillsConfig));
+      setStoredPlaybook(normalizePlaybook(saved.playbook));
+      setPlaybookCleared(false);
       const savedPipeline = normalizeVoicePipeline(saved.voicePipeline);
       if (isS2sPipeline(savedPipeline) && saved.realtimeS2sConfig) {
         setRealtimeS2sConfig(
@@ -452,99 +337,18 @@ export default function StudioPage() {
     }
   };
 
-  const playPreview = async () => {
-    setPreviewing(true);
-    setMessage('');
-    try {
-      const blob = await previewTts(
-        PREVIEW_SAMPLES[previewLang],
-        form.voiceId,
-        form.voiceSpeed,
-        form.voicePitch,
-        form.voiceLanguages,
-        form.ttsModel,
-        form.ttsSampleRate,
-        form.ttsEmotion,
-      );
-      const url = URL.createObjectURL(blob);
-      const audio = new Audio(url);
-      await audio.play();
-    } catch {
-      setMessage('TTS preview failed — set CARTESIA_API_KEY on API.');
-    } finally {
-      setPreviewing(false);
-    }
-  };
-
-  const onLlmProviderChange = (provider: 'groq' | 'gpt') => {
-    setForm((f) => ({
-      ...f,
-      llmProvider: provider,
-      llmModel: provider === 'gpt' ? DEFAULT_GPT_MODEL : DEFAULT_GROQ_MODEL,
-    }));
-  };
-
-  const onSttProviderChange = (provider: SttProvider) => {
-    setForm((f) => ({
-      ...f,
-      sttProvider: provider,
-      sttModel: defaultSttModel(provider),
-    }));
-  };
 
   const gptModelOptions = useMemo(() => {
     const known = GPT_MODEL_OPTIONS.some((option) => option.value === form.llmModel);
-    if (known || form.llmProvider !== 'gpt') return GPT_MODEL_OPTIONS;
+    if (known) return GPT_MODEL_OPTIONS;
     return [
       ...GPT_MODEL_OPTIONS,
       { value: form.llmModel, label: `${form.llmModel} (saved)` },
     ];
-  }, [form.llmModel, form.llmProvider]);
+  }, [form.llmModel]);
 
-  const openaiSttModelOptions = useMemo(() => {
-    const known = OPENAI_STT_MODEL_OPTIONS.some((option) => option.value === form.sttModel);
-    if (known || form.sttProvider !== 'openai') return [...OPENAI_STT_MODEL_OPTIONS];
-    return [
-      ...OPENAI_STT_MODEL_OPTIONS,
-      {
-        value: form.sttModel,
-        label: `${form.sttModel} (saved)`,
-        hint: 'Saved custom model',
-        tag: 'Custom' as const,
-        tagTone: 'gray' as const,
-      },
-    ];
-  }, [form.sttModel, form.sttProvider]);
 
-  const sarvamSttModelOptions = useMemo(() => {
-    const known = SARVAM_STT_MODEL_OPTIONS.some((option) => option.value === form.sttModel);
-    if (known || form.sttProvider !== 'sarvam') return [...SARVAM_STT_MODEL_OPTIONS];
-    return [
-      ...SARVAM_STT_MODEL_OPTIONS,
-      {
-        value: form.sttModel,
-        label: `${form.sttModel} (saved)`,
-        hint: 'Saved custom model',
-        tag: 'Custom' as const,
-        tagTone: 'gray' as const,
-      },
-    ];
-  }, [form.sttModel, form.sttProvider]);
 
-  const googleSttModelOptions = useMemo(() => {
-    const known = GOOGLE_STT_MODEL_OPTIONS.some((option) => option.value === form.sttModel);
-    if (known || form.sttProvider !== 'google') return [...GOOGLE_STT_MODEL_OPTIONS];
-    return [
-      ...GOOGLE_STT_MODEL_OPTIONS,
-      {
-        value: form.sttModel,
-        label: `${form.sttModel} (saved)`,
-        hint: 'Saved custom model',
-        tag: 'Custom' as const,
-        tagTone: 'gray' as const,
-      },
-    ];
-  }, [form.sttModel, form.sttProvider]);
 
   const toggleSpeakLanguage = (lang: SpeakLang) => {
     setForm((f) => {
@@ -557,7 +361,6 @@ export default function StudioPage() {
     });
   };
 
-  const selectedVoice = voices.find((v) => v.id === form.voiceId);
 
   return (
     <div className="card studio-page">
@@ -566,8 +369,8 @@ export default function StudioPage() {
         Agent Studio
       </h1>
       <p className="page-subtitle">
-        Configure your voice agent — identity, voice, product knowledge, skills, LLM, and STT settings.
-        Everything compiles when you save.
+        Configure your voice agent — identity, Gemini Live voice, product knowledge, skills, and
+        brain LLM. Everything compiles when you save.
       </p>
 
       <div className="studio-toolbar">
@@ -598,6 +401,8 @@ export default function StudioPage() {
               setForm(defaultForm());
               setBrainSummary('');
               setSkillsConfig(DEFAULT_SKILLS);
+              setStoredPlaybook(null);
+              setPlaybookCleared(false);
             }}
           >
             New
@@ -712,107 +517,37 @@ export default function StudioPage() {
             <div className="studio-section-header">
               <h2 className="studio-section-title">Voice pipeline</h2>
               <p className="studio-section-desc">
-                Fixed per agent — Simulator 2.0 and phone outbound use this setting. Choose Cascaded,
-                OpenAI Realtime S2S, or Gemini Live S2S, tune model/voice/language once, then Save.
+                Gemini Live speech-to-speech — used by Simulator 2.0 and phone outbound. Tune
+                model, voice, and language once, then Save.
               </p>
             </div>
             <div className="studio-field-grid">
               <div className="studio-field">
                 <label htmlFor="voicePipeline">Pipeline</label>
-                <select
-                  id="voicePipeline"
-                  value={form.voicePipeline}
-                  onChange={(e) => {
-                    const voicePipeline = normalizeVoicePipeline(e.target.value);
-                    setForm({ ...form, voicePipeline });
-                    setRealtimeS2sConfig(
-                      voicePipeline === 'gemini_live'
-                        ? defaultGeminiLiveS2sUserConfig()
-                        : voicePipeline === 'openai_realtime'
-                          ? defaultRealtimeS2sUserConfig()
-                          : realtimeS2sConfig,
-                    );
-                  }}
-                >
-                  <option value="cascaded">Cascaded (Azure STT + GPT + Cartesia)</option>
-                  <option value="openai_realtime">OpenAI Realtime S2S</option>
+                <select id="voicePipeline" value="gemini_live" disabled>
                   <option value="gemini_live">Gemini Live S2S</option>
                 </select>
               </div>
             </div>
-            {isS2sPipeline(form.voicePipeline) && (
-              <div className="studio-callout studio-callout--active sim-s2s-preset">
-                <RealtimeS2sSettingsForm
-                  config={realtimeS2sConfig}
-                  onChange={(config) => {
-                    setRealtimeS2sConfig(config);
-                    setForm((f) => ({ ...f, realtimeVoice: config.voice }));
-                  }}
-                  pipeline={form.voicePipeline}
-                />
-              </div>
-            )}
-            {form.voicePipeline === 'openai_realtime' && (
-              <p className="studio-field-hint">
-                Requires OPENAI_API_KEY on agent-v2. No Azure STT or Cartesia on the live call.
-              </p>
-            )}
-            {form.voicePipeline === 'gemini_live' && (
-              <p className="studio-field-hint">
-                Requires GEMINI_API_KEY (or GOOGLE_API_KEY) on agent-v2 and API for phone S2S.
-                Set language hi-IN for Hindi/Hinglish. Voice accent is global HD — not pure desi.
-              </p>
-            )}
-          </section>
-
-          {form.voicePipeline === 'cascaded' && (
-          <section className="studio-section">
-            <div className="studio-section-header">
-              <h2 className="studio-section-title">Speech engine</h2>
-              <p className="studio-section-desc">
-                Cartesia Sonic powers preview and live calls. Settings are saved with the agent.
-              </p>
+            <div className="studio-callout studio-callout--active sim-s2s-preset">
+              <RealtimeS2sSettingsForm
+                config={realtimeS2sConfig}
+                onChange={(config) => {
+                  setRealtimeS2sConfig(config);
+                  setForm((f) => ({
+                    ...f,
+                    voicePipeline: 'gemini_live',
+                    realtimeVoice: config.voice,
+                  }));
+                }}
+                pipeline="gemini_live"
+              />
             </div>
-            <div className="studio-field-grid">
-              <div className="studio-field">
-                <label htmlFor="ttsModel">TTS model</label>
-                <select
-                  id="ttsModel"
-                  value={form.ttsModel}
-                  onChange={(e) => setForm({ ...form, ttsModel: e.target.value })}
-                >
-                  {ttsModels.length === 0 && (
-                    <option value={form.ttsModel}>{form.ttsModel}</option>
-                  )}
-                  {ttsModels.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="studio-field">
-                <label htmlFor="ttsSampleRate">Sample rate</label>
-                <select
-                  id="ttsSampleRate"
-                  value={form.ttsSampleRate}
-                  onChange={(e) =>
-                    setForm({ ...form, ttsSampleRate: Number(e.target.value) })
-                  }
-                >
-                  {ttsSampleRates.length === 0 && (
-                    <option value={form.ttsSampleRate}>{form.ttsSampleRate} Hz</option>
-                  )}
-                  {ttsSampleRates.map((r) => (
-                    <option key={r.id} value={r.id}>
-                      {r.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
+            <p className="studio-field-hint">
+              Requires GEMINI_API_KEY (or GOOGLE_API_KEY) on agent-v2 and API for phone S2S. Set
+              language hi-IN for Hindi/Hinglish. Voice accent is global HD — not pure desi.
+            </p>
           </section>
-          )}
 
           <section className="studio-section">
             <div className="studio-section-header">
@@ -843,47 +578,10 @@ export default function StudioPage() {
             <div className="studio-section-header">
               <h2 className="studio-section-title">Voice & grammar</h2>
               <p className="studio-section-desc">
-                {form.voicePipeline === 'openai_realtime'
-                  ? 'OpenAI Realtime voice is selected above. Grammar still controls Hindi/Hinglish verb forms.'
-                  : form.voicePipeline === 'gemini_live'
-                    ? 'Gemini Live voice is selected above. Grammar still controls Hindi/Hinglish verb forms.'
-                    : 'Indian female Cartesia voices (Hindi / Hinglish). Grammar still controls Hindi/Hinglish verb forms.'}
+                Gemini Live voice is selected above. Grammar still controls Hindi/Hinglish verb
+                forms.
               </p>
             </div>
-            {form.voicePipeline === 'cascaded' && (
-            <div className="studio-field-grid">
-              <div className="studio-field studio-field--full">
-                <label htmlFor="voiceId">Indian female voice (Cartesia)</label>
-                <select
-                  id="voiceId"
-                  value={form.voiceId}
-                  disabled={voicesLoading || voices.length === 0}
-                  onChange={(e) => {
-                    const voiceId = e.target.value;
-                    const voice = voices.find((v) => v.id === voiceId);
-                    setForm((f) => ({
-                      ...f,
-                      voiceId,
-                      agentGender: voice ? voiceGenderToAgent(voice.gender) : f.agentGender,
-                    }));
-                  }}
-                >
-                  {voicesLoading && <option value={form.voiceId}>Loading voices…</option>}
-                  {!voicesLoading && voices.length === 0 && (
-                    <option value={form.voiceId}>No Indian female voices found</option>
-                  )}
-                  {voices.map((v) => (
-                    <option key={v.id} value={v.id}>
-                      {v.name} ({v.language}/{v.gender})
-                    </option>
-                  ))}
-                </select>
-                {selectedVoice?.description && (
-                  <p className="studio-field-hint">{selectedVoice.description}</p>
-                )}
-              </div>
-            </div>
-            )}
 
             <p className="studio-section-desc" style={{ marginTop: '0.25rem' }}>
               Hindi / Hinglish grammar
@@ -908,77 +606,11 @@ export default function StudioPage() {
             </div>
           </section>
 
-          {form.voicePipeline === 'cascaded' ? (
           <section className="studio-section">
             <div className="studio-section-header">
               <h2 className="studio-section-title">Delivery</h2>
               <p className="studio-section-desc">
-                Cartesia generation controls: speed, volume, and emotion (Sonic 3+).
-              </p>
-            </div>
-            <div className="studio-field-grid">
-              <div className="studio-slider-card">
-                <div className="studio-slider-head">
-                  <label htmlFor="voiceSpeed">Speed</label>
-                  <span className="studio-slider-value">{form.voiceSpeed.toFixed(1)}×</span>
-                </div>
-                <input
-                  id="voiceSpeed"
-                  type="range"
-                  min={0.6}
-                  max={1.5}
-                  step={0.05}
-                  value={form.voiceSpeed}
-                  onChange={(e) => setForm({ ...form, voiceSpeed: Number(e.target.value) })}
-                />
-              </div>
-              <div className="studio-slider-card">
-                <div className="studio-slider-head">
-                  <label htmlFor="voicePitch">Volume</label>
-                  <span className="studio-slider-value">{form.voicePitch.toFixed(1)}</span>
-                </div>
-                <input
-                  id="voicePitch"
-                  type="range"
-                  min={0.5}
-                  max={2}
-                  step={0.05}
-                  value={form.voicePitch}
-                  onChange={(e) => setForm({ ...form, voicePitch: Number(e.target.value) })}
-                />
-              </div>
-              <div className="studio-field studio-field--full">
-                <label htmlFor="ttsEmotion">Emotion</label>
-                <select
-                  id="ttsEmotion"
-                  value={form.ttsEmotion}
-                  onChange={(e) => setForm({ ...form, ttsEmotion: e.target.value })}
-                >
-                  {ttsEmotions.length === 0 && (
-                    <option value={form.ttsEmotion}>
-                      {form.ttsEmotion || 'Neutral (auto from transcript)'}
-                    </option>
-                  )}
-                  {ttsEmotions.map((e) => (
-                    <option key={e.id || 'auto'} value={e.id}>
-                      {e.label}
-                    </option>
-                  ))}
-                </select>
-                <p className="studio-field-hint">
-                  Simulator 2.0 live calls: empty / Neutral defaults to Cartesia{' '}
-                  <strong>happy</strong> (lightly expressive / positive mood). Classic
-                  simulator still uses the saved value as-is.
-                </p>
-              </div>
-            </div>
-          </section>
-          ) : (
-          <section className="studio-section">
-            <div className="studio-section-header">
-              <h2 className="studio-section-title">Delivery</h2>
-              <p className="studio-section-desc">
-                OpenAI Realtime speaking speed (applied to the S2S session).
+                Speaking speed hint for the Gemini Live session (when supported by the model).
               </p>
             </div>
             <div className="studio-field-grid">
@@ -999,41 +631,44 @@ export default function StudioPage() {
               </div>
             </div>
           </section>
-          )}
-
-          {form.voicePipeline === 'cascaded' && (
-          <section className="studio-section">
-            <div className="studio-section-header">
-              <h2 className="studio-section-title">Preview</h2>
-              <p className="studio-section-desc">Hear how the agent sounds before going live.</p>
-            </div>
-            <div className="studio-preview-bar">
-              <div className="studio-field">
-                <label htmlFor="previewLang">Preview language</label>
-                <select
-                  id="previewLang"
-                  value={previewLang}
-                  onChange={(e) => setPreviewLang(e.target.value as SpeakLang)}
-                >
-                  {speakLanguages.map((lang) => (
-                    <option key={lang} value={lang}>
-                      {lang === 'en' ? 'English' : lang === 'hi' ? 'Hindi' : 'Hinglish'}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <button type="button" onClick={playPreview} disabled={previewing || !form.voiceId}>
-                {previewing ? '▶ Playing…' : '▶ Preview TTS'}
-              </button>
-            </div>
-          </section>
-          )}
         </div>
       )}
 
       {tab === 'brain' && (
         <div className="studio-tab">
           <BrainVisualization />
+
+          <section className="studio-section" style={{ marginTop: '1.5rem' }}>
+            <div className="studio-section-header">
+              <h2 className="studio-section-title">Agent rules</h2>
+              <p className="studio-section-desc">
+                Short must-follow rules for this client (domain lock, "never quote X", escalation).
+                Always in the call prompt — unlike Product knowledge, which is searched when large.
+              </p>
+            </div>
+            <div className="studio-editor-panel">
+              <div className="studio-editor-head">
+                <label htmlFor="agentRules">Rules</label>
+                <span className="studio-tag studio-tag--blue">
+                  {form.agentRules.length}/{AGENT_RULES_MAX_CHARS}
+                </span>
+              </div>
+              <textarea
+                id="agentRules"
+                maxLength={AGENT_RULES_MAX_CHARS}
+                rows={6}
+                placeholder={'- Only answer agriculture questions; politely decline anything else.\n- Never recommend a pesticide dose that is not in Product knowledge.'}
+                value={form.agentRules}
+                onChange={(e) => setForm({ ...form, agentRules: e.target.value })}
+              />
+              {ruleLikeBrainHeadings(form.brainMarkdown).length > 0 && (
+                <p className="studio-field-hint">
+                  These Brain sections look like rules — consider moving their key lines here:{' '}
+                  {ruleLikeBrainHeadings(form.brainMarkdown).join(' · ')}
+                </p>
+              )}
+            </div>
+          </section>
 
           <section className="studio-section" style={{ marginTop: '1.5rem' }}>
             <div className="studio-section-header">
@@ -1117,6 +752,30 @@ export default function StudioPage() {
               </label>
             </div>
           </section>
+        </div>
+      )}
+
+      {tab === 'playbook' && (
+        <div className="studio-tab">
+          <PlaybookPanel
+            playbook={playbook}
+            derived={!storedPlaybook}
+            onChange={(next) => {
+              setStoredPlaybook(next);
+              setPlaybookCleared(false);
+            }}
+            onApplyTemplate={(templateId) => {
+              const applied = applyPlaybookTemplate(templateId, skillsConfig.booking);
+              setStoredPlaybook(applied.playbook);
+              setPlaybookCleared(false);
+              setSkillsConfig({ ...skillsConfig, booking: applied.booking });
+              setMessage('Template applied — review, then Save agent.');
+            }}
+            onReset={() => {
+              setStoredPlaybook(null);
+              setPlaybookCleared(true);
+            }}
+          />
         </div>
       )}
 
@@ -1356,42 +1015,11 @@ export default function StudioPage() {
         <div className="studio-tab">
           <section className="studio-section">
             <div className="studio-section-header">
-              <h2 className="studio-section-title">Inference provider</h2>
+              <h2 className="studio-section-title">OpenAI GPT</h2>
               <p className="studio-section-desc">
-                Pick the engine that powers this agent&apos;s replies during live calls.
+                Brain summarization and product-knowledge compression use OpenAI GPT
+                (not the live voice pipeline — that is Gemini Live).
               </p>
-            </div>
-
-            <div className="llm-provider-grid">
-              {LLM_PROVIDERS.map((provider) => {
-                const selected = form.llmProvider === provider.id;
-                return (
-                  <button
-                    key={provider.id}
-                    type="button"
-                    className={`llm-provider-card${selected ? ' selected' : ''}`}
-                    onClick={() => onLlmProviderChange(provider.id)}
-                    aria-pressed={selected}
-                  >
-                    <span className="llm-provider-icon" aria-hidden>
-                      {provider.icon}
-                    </span>
-                    <div className="llm-provider-body">
-                      <div className="llm-provider-head">
-                        <strong>{provider.label}</strong>
-                        <span className={`llm-tag llm-tag--${provider.badgeTone}`}>
-                          {provider.badge}
-                        </span>
-                      </div>
-                      <p>{provider.description}</p>
-                      {provider.id === 'groq' && (
-                        <span className="llm-provider-model">{provider.model}</span>
-                      )}
-                    </div>
-                    {selected && <span className="llm-provider-check" aria-hidden>✓</span>}
-                  </button>
-                );
-              })}
             </div>
           </section>
 
@@ -1399,63 +1027,47 @@ export default function StudioPage() {
             <div className="studio-section-header">
               <h2 className="studio-section-title">Model</h2>
               <p className="studio-section-desc">
-                {form.llmProvider === 'gpt'
-                  ? 'Select the GPT model compiled into this agent on save.'
-                  : 'Groq uses a fixed high-speed model for consistent call latency.'}
+                Select the GPT model compiled into this agent on save.
               </p>
             </div>
 
-            {form.llmProvider === 'gpt' ? (
-              <div className="llm-model-grid">
-                {gptModelOptions.map((option) => {
-                  const selected = form.llmModel === option.value;
-                  const tagTone =
-                    'tagTone' in option ? option.tagTone : ('gray' as const);
-                  const tag = 'tag' in option ? option.tag : undefined;
-                  return (
-                    <label
-                      key={option.value}
-                      className={`llm-model-card${selected ? ' selected' : ''}`}
-                    >
-                      <input
-                        type="radio"
-                        name="gptModel"
-                        value={option.value}
-                        checked={selected}
-                        onChange={() => setForm({ ...form, llmModel: option.value })}
-                        className="llm-model-input"
-                      />
-                      <div className="llm-model-card-body">
-                        <div className="llm-model-card-head">
-                          <strong>{option.label}</strong>
-                          {tag ? (
-                            <span className={`llm-tag llm-tag--${tagTone}`}>{tag}</span>
-                          ) : null}
-                        </div>
-                        {'hint' in option && option.hint ? (
-                          <p>{option.hint}</p>
+            <div className="llm-model-grid">
+              {gptModelOptions.map((option) => {
+                const selected = form.llmModel === option.value;
+                const tagTone =
+                  'tagTone' in option ? option.tagTone : ('gray' as const);
+                const tag = 'tag' in option ? option.tag : undefined;
+                return (
+                  <label
+                    key={option.value}
+                    className={`llm-model-card${selected ? ' selected' : ''}`}
+                  >
+                    <input
+                      type="radio"
+                      name="gptModel"
+                      value={option.value}
+                      checked={selected}
+                      onChange={() =>
+                        setForm({ ...form, llmProvider: 'gpt', llmModel: option.value })
+                      }
+                      className="llm-model-input"
+                    />
+                    <div className="llm-model-card-body">
+                      <div className="llm-model-card-head">
+                        <strong>{option.label}</strong>
+                        {tag ? (
+                          <span className={`llm-tag llm-tag--${tagTone}`}>{tag}</span>
                         ) : null}
-                        <code className="llm-model-id">{option.value}</code>
                       </div>
-                    </label>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="llm-groq-model-card">
-                <div className="llm-groq-model-icon" aria-hidden>
-                  🚀
-                </div>
-                <div>
-                  <div className="llm-model-card-head">
-                    <strong>Llama 3.3 70B Versatile</strong>
-                    <span className="llm-tag llm-tag--green">Default</span>
-                  </div>
-                  <p>Balanced speed and quality on Groq&apos;s inference stack.</p>
-                  <code className="llm-model-id">{DEFAULT_GROQ_MODEL}</code>
-                </div>
-              </div>
-            )}
+                      {'hint' in option && option.hint ? (
+                        <p>{option.hint}</p>
+                      ) : null}
+                      <code className="llm-model-id">{option.value}</code>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
           </section>
 
           <div className="studio-callout studio-callout--active">
@@ -1465,7 +1077,7 @@ export default function StudioPage() {
             <div>
               <p className="studio-callout-label">Active configuration</p>
               <p className="studio-callout-value">
-                {form.llmProvider === 'gpt' ? 'OpenAI GPT' : 'Groq'} · {form.llmModel}
+                OpenAI GPT · {form.llmModel}
               </p>
             </div>
           </div>
@@ -1478,254 +1090,10 @@ export default function StudioPage() {
               <p className="studio-callout-label">API keys (agent worker)</p>
               <ul className="llm-callout-list">
                 <li>
-                  <code>GROQ_API_KEY</code> — required for Groq provider
-                </li>
-                <li>
-                  <code>OPENAI_API_KEY</code> — required for GPT provider
+                  <code>OPENAI_API_KEY</code> — required for GPT brain summarization
                 </li>
               </ul>
-              <p className="llm-callout-footnote">Save the agent after changing provider or model.</p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {tab === 'stt' && (
-        <div className="studio-tab">
-          <section className="studio-section">
-            <div className="studio-section-header">
-              <h2 className="studio-section-title">Speech-to-text provider</h2>
-              <p className="studio-section-desc">
-                Choose how this agent listens during live calls. Azure remains the default.
-              </p>
-            </div>
-
-            <div className="llm-provider-grid">
-              {STT_PROVIDERS.map((provider) => {
-                const selected = form.sttProvider === provider.id;
-                return (
-                  <button
-                    key={provider.id}
-                    type="button"
-                    className={`llm-provider-card${selected ? ' selected' : ''}`}
-                    onClick={() => onSttProviderChange(provider.id)}
-                    aria-pressed={selected}
-                  >
-                    <span className="llm-provider-icon" aria-hidden>
-                      {provider.icon}
-                    </span>
-                    <div className="llm-provider-body">
-                      <div className="llm-provider-head">
-                        <strong>{provider.label}</strong>
-                        <span className={`llm-tag llm-tag--${provider.badgeTone}`}>
-                          {provider.badge}
-                        </span>
-                      </div>
-                      <p>{provider.description}</p>
-                    </div>
-                    {selected && <span className="llm-provider-check" aria-hidden>✓</span>}
-                  </button>
-                );
-              })}
-            </div>
-          </section>
-
-          <section className="studio-section">
-            <div className="studio-section-header">
-              <h2 className="studio-section-title">Model</h2>
-              <p className="studio-section-desc">
-                {form.sttProvider === 'openai'
-                  ? 'Select the OpenAI transcription model used for Simulator 2.0 cascaded calls.'
-                  : form.sttProvider === 'sarvam'
-                    ? 'Select Saaras model. Hinglish agents auto-use codemix mode on phone and simulator.'
-                    : form.sttProvider === 'google'
-                      ? 'Select Chirp / telephony model. Languages follow the Voice tab (en-IN + hi-IN).'
-                    : 'Azure Speech uses the regional Speech service — no separate model id is required.'}
-              </p>
-            </div>
-
-            {form.sttProvider === 'openai' ? (
-              <div className="llm-model-grid">
-                {openaiSttModelOptions.map((option) => {
-                  const selected = form.sttModel === option.value;
-                  const tagTone =
-                    'tagTone' in option ? option.tagTone : ('gray' as const);
-                  const tag = 'tag' in option ? option.tag : undefined;
-                  return (
-                    <label
-                      key={option.value}
-                      className={`llm-model-card${selected ? ' selected' : ''}`}
-                    >
-                      <input
-                        type="radio"
-                        name="openaiSttModel"
-                        value={option.value}
-                        checked={selected}
-                        onChange={() =>
-                          setForm({
-                            ...form,
-                            sttModel: option.value || DEFAULT_OPENAI_STT_MODEL,
-                          })
-                        }
-                        className="llm-model-input"
-                      />
-                      <div className="llm-model-card-body">
-                        <div className="llm-model-card-head">
-                          <strong>{option.label}</strong>
-                          {tag ? (
-                            <span className={`llm-tag llm-tag--${tagTone}`}>{tag}</span>
-                          ) : null}
-                        </div>
-                        {'hint' in option && option.hint ? <p>{option.hint}</p> : null}
-                        <code className="llm-model-id">{option.value}</code>
-                      </div>
-                    </label>
-                  );
-                })}
-              </div>
-            ) : form.sttProvider === 'sarvam' ? (
-              <div className="llm-model-grid">
-                {sarvamSttModelOptions.map((option) => {
-                  const selected = form.sttModel === option.value;
-                  const tagTone =
-                    'tagTone' in option ? option.tagTone : ('gray' as const);
-                  const tag = 'tag' in option ? option.tag : undefined;
-                  return (
-                    <label
-                      key={option.value}
-                      className={`llm-model-card${selected ? ' selected' : ''}`}
-                    >
-                      <input
-                        type="radio"
-                        name="sarvamSttModel"
-                        value={option.value}
-                        checked={selected}
-                        onChange={() =>
-                          setForm({
-                            ...form,
-                            sttModel: option.value,
-                          })
-                        }
-                        className="llm-model-input"
-                      />
-                      <div className="llm-model-card-body">
-                        <div className="llm-model-card-head">
-                          <strong>{option.label}</strong>
-                          {tag ? (
-                            <span className={`llm-tag llm-tag--${tagTone}`}>{tag}</span>
-                          ) : null}
-                        </div>
-                        {'hint' in option && option.hint ? <p>{option.hint}</p> : null}
-                        <code className="llm-model-id">{option.value}</code>
-                      </div>
-                    </label>
-                  );
-                })}
-              </div>
-            ) : form.sttProvider === 'google' ? (
-              <div className="llm-model-grid">
-                {googleSttModelOptions.map((option) => {
-                  const selected = form.sttModel === option.value;
-                  const tagTone =
-                    'tagTone' in option ? option.tagTone : ('gray' as const);
-                  const tag = 'tag' in option ? option.tag : undefined;
-                  return (
-                    <label
-                      key={option.value}
-                      className={`llm-model-card${selected ? ' selected' : ''}`}
-                    >
-                      <input
-                        type="radio"
-                        name="googleSttModel"
-                        value={option.value}
-                        checked={selected}
-                        onChange={() =>
-                          setForm({
-                            ...form,
-                            sttModel: option.value,
-                          })
-                        }
-                        className="llm-model-input"
-                      />
-                      <div className="llm-model-card-body">
-                        <div className="llm-model-card-head">
-                          <strong>{option.label}</strong>
-                          {tag ? (
-                            <span className={`llm-tag llm-tag--${tagTone}`}>{tag}</span>
-                          ) : null}
-                        </div>
-                        {'hint' in option && option.hint ? <p>{option.hint}</p> : null}
-                        <code className="llm-model-id">{option.value}</code>
-                      </div>
-                    </label>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="llm-groq-model-card">
-                <div className="llm-groq-model-icon" aria-hidden>
-                  🎧
-                </div>
-                <div>
-                  <div className="llm-model-card-head">
-                    <strong>Azure Speech (multilingual)</strong>
-                    <span className="llm-tag llm-tag--green">Default</span>
-                  </div>
-                  <p>
-                    Keeps phrase boosting, confidence filtering, and email-capture STT
-                    relaxation. Languages follow the Voice tab selection.
-                  </p>
-                  <code className="llm-model-id">azure-speech</code>
-                </div>
-              </div>
-            )}
-          </section>
-
-          <div className="studio-callout studio-callout--active">
-            <span className="studio-callout-icon" aria-hidden>
-              🎧
-            </span>
-            <div>
-              <p className="studio-callout-label">Active configuration</p>
-              <p className="studio-callout-value">
-                {form.sttProvider === 'openai'
-                  ? 'OpenAI STT'
-                  : form.sttProvider === 'sarvam'
-                    ? 'Sarvam Saaras'
-                    : form.sttProvider === 'google'
-                      ? 'Google Cloud STT'
-                    : 'Azure Speech'}
-                {form.sttProvider === 'openai' || form.sttProvider === 'sarvam' || form.sttProvider === 'google'
-                  ? ` · ${form.sttModel || resolveSttModel(form.sttProvider, form.sttModel)}`
-                  : ''}
-              </p>
-            </div>
-          </div>
-
-          <div className="studio-callout studio-callout--info">
-            <span className="studio-callout-icon" aria-hidden>
-              🔑
-            </span>
-            <div>
-              <p className="studio-callout-label">API keys (agent worker)</p>
-              <ul className="llm-callout-list">
-                <li>
-                  <code>AZURE_SPEECH_KEY</code> / <code>AZURE_SPEECH_REGION</code> — Azure STT
-                </li>
-                <li>
-                  <code>SARVAM_API_KEY</code> — Sarvam Saaras STT (phone + simulator)
-                </li>
-                <li>
-                  <code>GOOGLE_CLOUD_PROJECT</code> / <code>GOOGLE_APPLICATION_CREDENTIALS</code> — Google STT (phone + simulator)
-                </li>
-                <li>
-                  <code>OPENAI_API_KEY</code> — OpenAI STT (Simulator 2.0 cascaded)
-                </li>
-              </ul>
-              <p className="llm-callout-footnote">
-                Sarvam uses codemix mode automatically when Voice tab includes Hinglish. Save the
-                agent after changing provider or model.
-              </p>
+              <p className="llm-callout-footnote">Save the agent after changing model.</p>
             </div>
           </div>
         </div>

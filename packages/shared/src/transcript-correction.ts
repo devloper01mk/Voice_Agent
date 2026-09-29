@@ -17,7 +17,7 @@ export interface TranscriptCorrectionResult {
 
 const SKIP_CORRECTION_MIN_CONFIDENCE = 0.85;
 const RUN_CORRECTION_MAX_CONFIDENCE = 0.75;
-/** Hard cap so a slow Groq hop cannot stall the main agent reply. */
+/** Hard cap so a slow OpenAI hop cannot stall the main agent reply. */
 const CORRECTION_FETCH_TIMEOUT_MS = 250;
 
 /** VW Virtus phonetics / STT mishears → Virtus (not true competitors like Veloster). */
@@ -230,7 +230,7 @@ export async function correctTranscriptForLlm(
     };
   }
 
-  const apiKey = process.env.GROQ_API_KEY;
+  const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     return {
       corrected: heard,
@@ -241,7 +241,9 @@ export async function correctTranscriptForLlm(
   }
 
   const model =
-    process.env.GROQ_FAST_MODEL ?? process.env.GROQ_FALLBACK_MODEL ?? 'llama-3.1-8b-instant';
+    process.env.OPENAI_FAST_MODEL?.trim() ||
+    process.env.OPENAI_MODEL?.trim() ||
+    'gpt-4o-mini';
 
   const context = [
     input.recentTurns?.length ? `Recent turns:\n${input.recentTurns.join('\n')}` : '',
@@ -256,7 +258,7 @@ export async function correctTranscriptForLlm(
     .join('\n');
 
   try {
-    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,

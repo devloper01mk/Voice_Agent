@@ -1,54 +1,39 @@
-import { beta, voice } from '@livekit/agents';
+import { voice } from '@livekit/agents';
 import type { Room } from '@livekit/rtc-node';
 import {
   buildGeminiLiveS2sInstructionSupplement,
-  buildRealtimeS2sInstructionSupplement,
   buildSimulator2Instructions,
   appendHinglishGenderLock,
   isFemaleGeminiLiveVoice,
-  isFemaleRealtimeVoice,
-  isGeminiLivePipeline,
-  isOpenaiRealtimePipeline,
   mergeSkillsConfig,
   normalizeRealtimeS2sUserConfig,
   resolveSimulator2TtsEmotion,
   SIMULATOR2_DEFAULT_TTS_EMOTION,
   type CallDirection,
   productKnowledgeFromSources,
+  resolvePackForBooking,
 } from '@vsa/shared';
 import type { RuntimeAgent } from './load-agent.js';
 import { createGeminiLiveModel } from './gemini-live-factory.js';
-import { createLlm } from './llm-factory.js';
-import { createMultilingualCartesiaTts } from './multilingual-tts.js';
-import { createRealtimeModel } from './realtime-factory.js';
 import { createTools } from './tools.js';
+import { createGuardedEndCallTool } from './end-call-tool.js';
+import { withCachedResult } from './tool-result-cache.js';
 import { createUserTurnHandler, type BookingLockBox } from './user-turn-handler.js';
 
 export { resolveSimulator2TtsEmotion, SIMULATOR2_DEFAULT_TTS_EMOTION };
 
-const END_CALL_EXTRA = `
-Also call end_call when:
-- Off-topic / irrelevant chat hit the redirect limit (after short product redirects).
-- Timepass / casual banter hit the casual-turn limit.
-- Caller is not interested and you have given the polite close.
+function buildEndCallExtra(packRules: string[]): string {
+  return `
+Call end_call only when the caller's latest words are one of these, with no guessing:
+- thank you, bye, or bas (bas only when that is the whole reply, or "bas ho gaya")
+- wrong number
+- do not call again
 
-Never call end_call when the caller asks who you are or why you called — restate purpose and continue.
-Never call end_call when they choose a listed offering or ask what you want them to do — recommend from Product Knowledge and offer the next step.
-Never announce a booking time or “noted” slot unless capture_demo_lead already returned ok:true.
-Never say “booking confirm ho gayi/gaya” or that the slot is locked unless that tool returned ok:true.
-If the caller asks a product question, answer it — do not demand name/phone first.
-If lookup_hotel_availability is available, call it for every clear city (and/or state) the caller names — pass city in English (मनाली→Manali, आगरा→Agra). 
-**Brain + live:** existence/rates from live lookup; sales vibe from Product Knowledge only if it does not contradict live. Never deny a city from Product Knowledge alone.
-Every different city = a new tool call. Never volunteer a destination city they did not name (except 2–3 short choices when clarifying a vague place).
-Vague place (landmark, area, “pahad”, “Taj ke paas”, not a clear city/state): do NOT call lookup yet. Salesperson style — acknowledge, map to nearest city or offer 2–3 city options, then lookup after they pick. Never invent rates; never say a dry “inventory nahi ho rahi” for an unclear place.
-Sales tease (vibe / premium feel) is OK; NEVER invent Suite / bed counts / prices unless that exact row is in the latest lookup result.
-Multi-property city (Hostel + Resort): if the tool asks which property, ask — do NOT dump Hostel dorm rates as the whole city. After they pick Resort/premium/Suite, call lookup AGAIN with hotel_name (e.g. Resort) and room_name if named.
-If lookup_hotel_availability returns fallback_to_brain:true, never deny the city; still never invent live beds/prices; offer retry/callback for rates.
-If a SYSTEM note already has LIVE LOOKUP JSON for a city, speak from that JSON + Brain tone — do not say nahi hai from memory.
-Before capture_demo_lead for a stay, pass city and room_name when known — the server re-checks live inventory; if sold out, offer alternatives and do not say booking confirmed.
-**Hangup order (critical for Gemini Live):** (1) Speak a short warm goodbye in sticky call language as AUDIO only. (2) Then invoke end_call as a pure tool with empty args. NEVER put spoken words (Theek hai, Bye, Thik hai, etc.) inside the tool call. Do not narrate the tool.
-Do not keep chatting after the wrap limit.
+A question is not a goodbye. Payment, price, date, room, name, cancellation, or "what if I don't pay" means stay and answer.
+Never call end_call because a booking was saved or the answer felt complete.
+${packRules.map((r) => `${r}\n`).join('')}Speak a short goodbye in audio first, then call end_call with empty args. If the tool returns do-not-hang-up, stay on the line.
 `;
+}
 
 function toolsWithEndCall(
   agentId: string,
@@ -59,19 +44,14 @@ function toolsWithEndCall(
   agentGender?: string,
 ) {
   const base = createTools(agentId, callId, knownContact, hooks, bookingPolicy, agentGender);
+  const pack = resolvePackForBooking(bookingPolicy);
   return [
     ...Object.entries(base).map(([name, toolDef]) => ({
-      ...toolDef,
+      ...withCachedResult(toolDef),
       id: name,
       name,
     })),
-    beta.createEndCallTool({
-      extraDescription: END_CALL_EXTRA,
-      deleteRoom: true,
-      // Goodbye must already be spoken before the tool. Asking Gemini to speak again
-      // after end_call makes it mix Hinglish into the tool channel → parse errors.
-      endInstructions: null,
-    }),
+    { ...withCachedResult(createGuardedEndCallTool(buildEndCallExtra(pack.endCallRules))), id: 'end_call', name: 'end_call' },
   ];
 }
 
@@ -106,14 +86,12 @@ export function createVoiceAgent(
 ) {
   const telephony = Boolean(opts?.telephony);
   const s2sVoice = agent.realtimeS2sConfig?.voice ?? agent.realtimeVoice;
-  const agentGender =
-    (isGeminiLivePipeline(agent.voicePipeline) && isFemaleGeminiLiveVoice(s2sVoice)) ||
-    (isOpenaiRealtimePipeline(agent.voicePipeline) && isFemaleRealtimeVoice(s2sVoice))
-      ? 'female'
-      : agent.agentGender === 'male'
-        ? 'male'
-        : 'female';
-  const { instructions, skills, knownContact } = buildInstructions(
+  const agentGender = isFemaleGeminiLiveVoice(s2sVoice)
+    ? 'female'
+    : agent.agentGender === 'male'
+      ? 'male'
+      : 'female';
+  const { skills, knownContact } = buildInstructions(
     agent,
     direction,
     prospectName,
@@ -148,101 +126,44 @@ export function createVoiceAgent(
     contactName: prospectName,
   };
 
-  if (isOpenaiRealtimePipeline(agent.voicePipeline)) {
-    const handleUserTurn = createUserTurnHandler({
-      ...turnOpts,
-      onLanguageLockChange: () => {},
-    });
-    const s2sConfig =
-      agent.realtimeS2sConfig ??
-      normalizeRealtimeS2sUserConfig({ voice: agent.realtimeVoice }, 'openai_realtime');
-    const agentForInstructions =
-      isFemaleRealtimeVoice(s2sConfig.voice) && agent.agentGender !== 'female'
-        ? { ...agent, agentGender: 'female' as const }
-        : agent;
-    const { instructions: s2sBaseInstructions } = buildInstructions(
-      agentForInstructions,
-      direction,
-      prospectName,
-      contactPhone,
-      contactEmail,
-    );
-    const s2sInstructions = appendHinglishGenderLock(
-      `${s2sBaseInstructions}${buildRealtimeS2sInstructionSupplement(s2sConfig.voice)}`,
-      agentForInstructions.agentGender,
-    );
+  const handleUserTurn = createUserTurnHandler({
+    ...turnOpts,
+    onLanguageLockChange: () => {},
+  });
+  const s2sConfig =
+    agent.realtimeS2sConfig ??
+    normalizeRealtimeS2sUserConfig({ voice: agent.realtimeVoice }, 'gemini_live');
+  const agentForInstructions =
+    isFemaleGeminiLiveVoice(s2sConfig.voice) && agent.agentGender !== 'female'
+      ? { ...agent, agentGender: 'female' as const }
+      : agent;
+  const { instructions: s2sBaseInstructions } = buildInstructions(
+    agentForInstructions,
+    direction,
+    prospectName,
+    contactPhone,
+    contactEmail,
+  );
+  const s2sInstructions = appendHinglishGenderLock(
+    `${s2sBaseInstructions}${buildGeminiLiveS2sInstructionSupplement(
+      s2sConfig.voice,
+      s2sConfig.model,
+      resolvePackForBooking(skills.booking).s2sRules,
+    )}`,
+    agentForInstructions.agentGender,
+    // Simulator Gemini Live re-scores full instructions every turn — keep under ~6k chars
+    // (~2–3k tokens) or time-to-first-audio balloons to 5–15s.
+    telephony ? 5500 : 6000,
+  );
 
-    return voice.Agent.create({
-      instructions: s2sInstructions,
-      llm: createRealtimeModel({
-        speed: agent.voiceSpeed,
-        s2sConfig,
-      }),
-      tools,
-      onUserTurnCompleted: handleUserTurn,
-    });
-  }
-
-  if (isGeminiLivePipeline(agent.voicePipeline)) {
-    const handleUserTurn = createUserTurnHandler({
-      ...turnOpts,
-      onLanguageLockChange: () => {},
-    });
-    const s2sConfig =
-      agent.realtimeS2sConfig ??
-      normalizeRealtimeS2sUserConfig({ voice: agent.realtimeVoice }, 'gemini_live');
-    const agentForInstructions =
-      isFemaleGeminiLiveVoice(s2sConfig.voice) && agent.agentGender !== 'female'
-        ? { ...agent, agentGender: 'female' as const }
-        : agent;
-    const { instructions: s2sBaseInstructions } = buildInstructions(
-      agentForInstructions,
-      direction,
-      prospectName,
-      contactPhone,
-      contactEmail,
-    );
-    const s2sInstructions = appendHinglishGenderLock(
-      `${s2sBaseInstructions}${buildGeminiLiveS2sInstructionSupplement(s2sConfig.voice, s2sConfig.model)}`,
-      agentForInstructions.agentGender,
-      // Simulator Gemini Live re-scores full instructions every turn — keep under ~6k chars
-      // (~2–3k tokens) or time-to-first-audio balloons to 5–15s.
-      telephony ? 5500 : 6000,
-    );
-
-    return voice.Agent.create({
+  return {
+    agent: voice.Agent.create({
       instructions: s2sInstructions,
       llm: createGeminiLiveModel({ s2sConfig, telephony }),
       tools,
       onUserTurnCompleted: handleUserTurn,
-    });
-  }
-
-  const cartesiaKey = process.env.CARTESIA_API_KEY;
-  if (!cartesiaKey) throw new Error('CARTESIA_API_KEY is required');
-
-  const tts = createMultilingualCartesiaTts({
-    apiKey: cartesiaKey,
-    voiceId: agent.voiceId,
-    voiceLanguages: agent.voiceLanguages,
-    speed: agent.voiceSpeed,
-    pitch: agent.voicePitch,
-    model: agent.ttsModel,
-    sampleRate: agent.ttsSampleRate ?? 24000,
-    emotion: resolveSimulator2TtsEmotion(agent.ttsEmotion),
+    }),
+    bookingLock,
     agentGender,
-  });
-
-  const handleUserTurn = createUserTurnHandler({
-    ...turnOpts,
-    onLanguageLockChange: (locale) => tts.setCallLanguageLock(locale),
-  });
-
-  return voice.Agent.create({
-    instructions,
-    llm: createLlm(agent),
-    tts,
-    tools,
-    onUserTurnCompleted: handleUserTurn,
-  });
+  };
 }

@@ -79,4 +79,34 @@ describe('appendHinglishGenderLock', () => {
     assert.ok(out.indexOf('Hinglish speaker grammar lock') > out.indexOf('trimmed for phone') || out.length < 2000);
     assert.ok(out.endsWith('karunga.') || /Never say karta/.test(out.slice(-200)));
   });
+
+  it('keeps sections appended after an earlier lock', () => {
+    const withLock = appendHinglishGenderLock('You are Riya.\n\n## Safety\nBe safe.', 'female');
+    const out = appendHinglishGenderLock(
+      `${withLock}\n\n## Gemini Live speech-to-speech\n- Keep replies short.`,
+      'female',
+    );
+    assert.match(out, /## Gemini Live speech-to-speech/);
+    assert.equal(out.match(/Hinglish speaker grammar lock/g)?.length, 1);
+    assert.ok(out.indexOf('Gemini Live speech') < out.indexOf('Hinglish speaker grammar lock'));
+  });
+
+  it('compresses by section priority instead of dropping the middle', () => {
+    const filler = (label: string) => Array.from({ length: 60 }, (_, i) => `- ${label} rule ${i}.`).join('\n');
+    const prompt = [
+      'You are Riya.',
+      `## Language (critical)\n${filler('language')}`,
+      `## Product Knowledge\n- Starter plan 999.\n${filler('catalog')}`,
+      `## Sales & support skills (how to behave)\n- Answer first.\n${filler('skill')}`,
+      `## Safety\n- DNC: end_call.\n${filler('safety')}`,
+      `## Unlisted extras\n${filler('extra')}`,
+    ].join('\n');
+    const out = appendHinglishGenderLock(prompt, 'female', 2000);
+    assert.ok(out.length <= 2000);
+    assert.match(out, /Starter plan 999/);
+    assert.match(out, /Answer first/);
+    assert.match(out, /DNC: end_call/);
+    assert.doesNotMatch(out, /## Unlisted extras/);
+    assert.match(out, /Hinglish speaker grammar lock/);
+  });
 });

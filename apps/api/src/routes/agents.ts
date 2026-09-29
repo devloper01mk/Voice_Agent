@@ -1,30 +1,41 @@
 import { Router } from 'express';
+import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import {
   DEFAULT_SKILLS,
   type AgentInput,
+  AGENT_RULES_MAX_CHARS,
+  applyPlaybookToSkills,
   compileSystemPrompt,
+  normalizePlaybook,
+  resolvePlaybook,
   estimateTokens,
   mergeSkillsConfig,
-  normalizeSttProvider,
   normalizeVoicePipeline,
   normalizeRealtimeS2sUserConfig,
-  resolveRealtimeVoice,
   resolveGeminiLiveVoice,
-  resolveSttModel,
   isS2sPipeline,
   type RealtimeS2sUserConfig,
   type SkillsConfig,
-  type SttProvider,
   type VoicePipeline,
 } from '@vsa/shared';
 import { summarizeProductKnowledge } from '../brain-summary.js';
-import { DEFAULT_CARTESIA_TTS_MODEL } from '../cartesia.js';
 import { prisma } from '../db.js';
 import { mutationsRouter } from './mutations.js';
 import { buildGlobalLearningRetrievalQuery, prospectKeyFromName } from '@vsa/shared';
 import { countGlobalLearningVectors, retrieveGlobalLearnings, backfillGlobalLearningsFromText } from '../vector-learnings.js';
 import { resolveKnownContact } from '../known-contact.js';
+import { reindexProductKnowledge } from '../product-knowledge.js';
+
+/** Index in the background — saving the agent must not wait on embeddings. */
+function queueProductKnowledgeReindex(agentId: string, brainMarkdown: string) {
+  void reindexProductKnowledge(agentId, brainMarkdown).catch((err) => {
+    console.warn(
+      '[agents] product knowledge reindex failed:',
+      err instanceof Error ? err.message : err,
+    );
+  });
+}
 
 function learningRetrievalLimit(): number {
   const explicit = process.env.LEARNING_VECTOR_TOP_K;
@@ -54,10 +65,7 @@ function storedRealtimeS2sConfig(
     },
     voicePipeline,
   );
-  config.voice =
-    voicePipeline === 'gemini_live'
-      ? resolveGeminiLiveVoice(config.voice)
-      : resolveRealtimeVoice(config.voice);
+  config.voice = resolveGeminiLiveVoice(config.voice);
   return config;
 }
 
@@ -186,6 +194,10 @@ const skillsSchema = z.object({
         .optional(),
       askEmail: z.boolean().optional(),
       notes: z.string().optional(),
+      bookingType: z.string().max(48).optional(),
+      speakAs: z.string().max(80).optional(),
+      allowedBookingTypes: z.array(z.string().max(48)).max(8).optional(),
+      locationType: z.string().max(32).optional(),
     })
     .optional(),
 });
@@ -201,42 +213,33 @@ const agentSchema = z.object({
   voiceSpeed: z.number().min(0.6).max(1.5).optional(),
   voicePitch: z.number().min(0.5).max(2).optional(),
   ttsModel: z.string().optional(),
-  ttsSampleRate: z
-    .number()
-    .int()
-    .refine((n) => [8000, 16000, 22050, 24000, 44100, 48000].includes(n), {
-      message: 'Invalid Cartesia sample rate',
-    })
-    .optional(),
+  ttsSampleRate: z.number().int().optional(),
   ttsEmotion: z.string().max(40).optional(),
-  voicePipeline: z.enum(['cascaded', 'openai_realtime', 'gemini_live']).optional(),
+  voicePipeline: z.enum(['gemini_live']).optional(),
   realtimeVoice: z.string().max(40).optional(),
   /** Loosely validated — normalized via normalizeRealtimeS2sUserConfig. */
   realtimeS2sConfig: z.record(z.string(), z.unknown()).optional(),
   agentGender: z.enum(['female', 'male']).optional(),
-  llmProvider: z.enum(['groq', 'gpt']).optional(),
+  llmProvider: z.enum(['gpt']).optional(),
   llmModel: z.string().optional(),
-  sttProvider: z.enum(['azure', 'openai', 'sarvam', 'google']).optional(),
+  /** Accepted for API compat; always overwritten to none / ''. */
+  sttProvider: z.string().optional(),
   sttModel: z.string().optional(),
   brainMarkdown: z.string(),
+  agentRules: z.string().max(AGENT_RULES_MAX_CHARS).optional(),
+  /** Loosely validated — normalized via normalizePlaybook. null clears it. */
+  playbook: z.record(z.string(), z.unknown()).nullable().optional(),
   learningsEnabled: z.boolean().optional(),
   generalKnowledgeEnabled: z.boolean().optional(),
   skillsConfig: skillsSchema.optional(),
 });
 
-const DEFAULT_BRAIN = `# Cronberry CRM
+/** Fallback when Studio leaves product name empty — never a real brand. */
+const FALLBACK_PRODUCT_NAME = 'our product';
 
-## Overview
-Cronberry CRM helps sales teams track leads, manage pipelines, and follow up faster.
+const DEFAULT_BRAIN = `# Product knowledge
 
-## Features
-- Pipeline automation
-- Lead scoring
-- Email sync
-- WhatsApp integration
-
-## Pricing
-Starter plan available. Contact for enterprise pricing.
+No product facts have been added yet. Answer only with what the caller can verify later and offer a callback for details.
 
 ## Out of scope — NEVER answer
 - Loans, banking, legal, medical advice
@@ -272,75 +275,69 @@ function buildAgentData(
     realtimeVoice?: string;
     realtimeS2sConfig?: Partial<RealtimeS2sUserConfig> | null;
     agentGender?: string;
-    llmProvider?: 'groq' | 'gpt';
+    llmProvider?: 'gpt';
     llmModel?: string;
-    sttProvider?: SttProvider;
+    sttProvider?: string;
     sttModel?: string;
     brainMarkdown: string;
+    agentRules?: string;
+    playbook?: unknown;
     learningsEnabled?: boolean;
     generalKnowledgeEnabled?: boolean;
     skillsConfig: SkillsConfig;
   },
   brainSummary: string,
 ) {
+  const playbook = normalizePlaybook(body.playbook);
   const skillsConfig = mergeSkillsConfig(body.skillsConfig);
   const voiceLanguages = normalizeVoiceLanguages(body.voiceLanguages, body.voiceLanguage);
   const generalKnowledgeEnabled = body.generalKnowledgeEnabled !== false;
-  const sttProvider = normalizeSttProvider(body.sttProvider);
-  const sttModel = resolveSttModel(sttProvider, body.sttModel);
   const voicePipeline = normalizeVoicePipeline(body.voicePipeline);
-  const realtimeS2sConfig = isS2sPipeline(voicePipeline)
-    ? normalizeRealtimeS2sUserConfig(
-        {
-          ...(body.realtimeS2sConfig ?? {}),
-          ...(body.realtimeVoice ? { voice: body.realtimeVoice } : {}),
-        },
-        voicePipeline,
-      )
-    : null;
-  const realtimeVoice = realtimeS2sConfig
-    ? voicePipeline === 'gemini_live'
-      ? resolveGeminiLiveVoice(realtimeS2sConfig.voice)
-      : resolveRealtimeVoice(realtimeS2sConfig.voice)
-    : voicePipeline === 'gemini_live'
-      ? resolveGeminiLiveVoice(body.realtimeVoice)
-      : resolveRealtimeVoice(body.realtimeVoice);
-  if (realtimeS2sConfig) realtimeS2sConfig.voice = realtimeVoice;
+  const realtimeS2sConfig = normalizeRealtimeS2sUserConfig(
+    {
+      ...(body.realtimeS2sConfig ?? {}),
+      ...(body.realtimeVoice ? { voice: body.realtimeVoice } : {}),
+    },
+    voicePipeline,
+  );
+  const realtimeVoice = resolveGeminiLiveVoice(realtimeS2sConfig.voice);
+  realtimeS2sConfig.voice = realtimeVoice;
+  // Voice is Gemini Live only — persist Gemini voice id; ignore cascaded STT/TTS fields.
+  const voiceId = resolveGeminiLiveVoice(body.realtimeVoice || body.voiceId || realtimeVoice);
 
   const promptInput: AgentInput = {
     name: body.name,
     greeting: body.greeting,
     persona: body.persona ?? 'friendly and professional',
-    productName: body.productName ?? 'Cronberry CRM',
-    voiceId: body.voiceId,
+    productName: body.productName?.trim() || FALLBACK_PRODUCT_NAME,
+    voiceId,
     voiceLanguages,
     voiceSpeed: body.voiceSpeed ?? 1.0,
     agentGender: body.agentGender === 'male' ? 'male' : 'female',
-    llmProvider: body.llmProvider ?? 'gpt',
-    llmModel:
-      body.llmModel ??
-      (body.llmProvider === 'groq'
-        ? process.env.GROQ_MODEL || 'llama-3.3-70b-versatile'
-        : process.env.OPENAI_MODEL || 'gpt-5.4-mini'),
+    llmProvider: 'gpt',
+    llmModel: body.llmModel ?? (process.env.OPENAI_MODEL || 'gpt-5.4-mini'),
     brainMarkdown: body.brainMarkdown,
     brainSummary,
     generalKnowledgeEnabled,
+    agentRules: body.agentRules?.trim() ?? '',
+    playbook,
     skillsConfig,
   };
   const compiledSystemPrompt = compileSystemPrompt(promptInput);
   return {
     ...promptInput,
+    playbook: playbook ? (playbook as object) : Prisma.DbNull,
     voiceLanguage: body.voiceLanguage ?? 'en',
     voicePitch: body.voicePitch ?? 1.0,
-    ttsModel: body.ttsModel ?? process.env.CARTESIA_MODEL_ID ?? DEFAULT_CARTESIA_TTS_MODEL,
-    ttsSampleRate: body.ttsSampleRate ?? 24000,
-    ttsEmotion: (body.ttsEmotion ?? '').trim(),
+    ttsModel: 'gemini',
+    ttsSampleRate: 24000,
+    ttsEmotion: '',
     voicePipeline,
     realtimeVoice,
-    realtimeS2sConfig: realtimeS2sConfig,
+    realtimeS2sConfig: realtimeS2sConfig as object,
     llmProvider: promptInput.llmProvider,
-    sttProvider,
-    sttModel,
+    sttProvider: 'none',
+    sttModel: '',
     brainSummary,
     learningsEnabled: body.learningsEnabled !== false,
     generalKnowledgeEnabled,
@@ -366,7 +363,7 @@ async function resolveBrainSummary(
   merged: {
     productName: string;
     brainMarkdown: string;
-    llmProvider: 'groq' | 'gpt';
+    llmProvider: 'gpt';
     llmModel: string;
   },
   existing?: { brainMarkdown: string; brainSummary: string },
@@ -434,7 +431,7 @@ agentsRouter.get('/', async (_req, res) => {
         promptTokenCount: a.promptTokenCount,
         generalKnowledgeEnabled: a.generalKnowledgeEnabled,
         updatedAt: a.updatedAt,
-        bookingOutcome: booking.outcome,
+        bookingOutcome: booking?.outcome,
       };
     }),
   );
@@ -489,7 +486,10 @@ agentsRouter.get('/:id/runtime', async (req, res) => {
   const contactEmail =
     typeof req.query.contactEmail === 'string' ? req.query.contactEmail : undefined;
 
-  const skillsConfig = mergeSkillsConfig(agent.skillsConfig as unknown as SkillsConfig);
+  const skillsConfig = applyPlaybookToSkills(
+    mergeSkillsConfig(agent.skillsConfig as unknown as SkillsConfig),
+    agent.playbook,
+  );
   const memory = await resolveKnownContact(
     agent.id,
     {
@@ -539,10 +539,7 @@ agentsRouter.get('/:id/runtime', async (req, res) => {
     agent.realtimeVoice,
   );
   const realtimeVoice =
-    realtimeS2sConfig?.voice ??
-    (voicePipeline === 'gemini_live'
-      ? resolveGeminiLiveVoice(agent.realtimeVoice)
-      : resolveRealtimeVoice(agent.realtimeVoice));
+    realtimeS2sConfig?.voice ?? resolveGeminiLiveVoice(agent.realtimeVoice);
   const compiledSystemPrompt = compileSystemPrompt({
     name: agent.name,
     greeting: agent.greeting,
@@ -552,11 +549,13 @@ agentsRouter.get('/:id/runtime', async (req, res) => {
     voiceLanguages: agent.voiceLanguages,
     voiceSpeed: agent.voiceSpeed,
     agentGender: agent.agentGender === 'male' ? 'male' : 'female',
-    llmProvider: agent.llmProvider === 'groq' ? 'groq' : 'gpt',
+    llmProvider: 'gpt',
     llmModel: agent.llmModel,
     brainMarkdown: agent.brainMarkdown,
     brainSummary: agent.brainSummary,
     generalKnowledgeEnabled,
+    agentRules: agent.agentRules,
+    playbook: agent.playbook,
     skillsConfig,
   });
 
@@ -575,14 +574,12 @@ agentsRouter.get('/:id/runtime', async (req, res) => {
     ttsEmotion: agent.ttsEmotion ?? '',
     voicePipeline,
     realtimeVoice,
+    playbook: resolvePlaybook(agent.playbook, skillsConfig.booking),
     ...(realtimeS2sConfig ? { realtimeS2sConfig } : {}),
     llmProvider: agent.llmProvider,
     llmModel: agent.llmModel,
-    sttProvider: normalizeSttProvider(agent.sttProvider),
-    sttModel: resolveSttModel(
-      normalizeSttProvider(agent.sttProvider),
-      agent.sttModel,
-    ),
+    sttProvider: 'none',
+    sttModel: '',
     agentGender: agent.agentGender,
     compiledSystemPrompt,
     brainSummary: agent.brainSummary,
@@ -615,18 +612,11 @@ agentsRouter.post('/', async (req, res) => {
     ...parsed.data,
     brainMarkdown,
     persona: parsed.data.persona ?? 'friendly and professional',
-    productName: parsed.data.productName ?? 'Cronberry CRM',
-    llmProvider: (parsed.data.llmProvider ?? 'gpt') as 'groq' | 'gpt',
-    llmModel:
-      parsed.data.llmModel ??
-      (parsed.data.llmProvider === 'groq'
-        ? process.env.GROQ_MODEL || 'llama-3.3-70b-versatile'
-        : process.env.OPENAI_MODEL || 'gpt-5.4-mini'),
-    sttProvider: normalizeSttProvider(parsed.data.sttProvider),
-    sttModel: resolveSttModel(
-      normalizeSttProvider(parsed.data.sttProvider),
-      parsed.data.sttModel,
-    ),
+    productName: parsed.data.productName?.trim() || FALLBACK_PRODUCT_NAME,
+    llmProvider: 'gpt' as const,
+    llmModel: parsed.data.llmModel ?? (process.env.OPENAI_MODEL || 'gpt-5.4-mini'),
+    sttProvider: 'none',
+    sttModel: '',
     // `skillsSchema` has optional nested fields (e.g. core.dnc). Cast so TS
     // doesn't block merge; mergeSkillsConfig falls back to defaults at runtime.
     skillsConfig: mergeSkillsConfig(
@@ -638,6 +628,7 @@ agentsRouter.post('/', async (req, res) => {
     const brainSummary = await resolveBrainSummary(merged);
     const data = buildAgentData(merged, brainSummary);
     const agent = await prisma.agent.create({ data });
+    queueProductKnowledgeReindex(agent.id, agent.brainMarkdown);
     res.status(201).json(agent);
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Brain summarization failed';
@@ -666,12 +657,9 @@ agentsRouter.put('/:id', async (req, res) => {
         : existing.voiceLanguages),
     voiceSpeed: parsed.data.voiceSpeed ?? existing.voiceSpeed,
     voicePitch: parsed.data.voicePitch ?? existing.voicePitch,
-    ttsModel: parsed.data.ttsModel ?? existing.ttsModel,
-    ttsSampleRate: parsed.data.ttsSampleRate ?? existing.ttsSampleRate ?? 24000,
-    ttsEmotion:
-      parsed.data.ttsEmotion !== undefined
-        ? parsed.data.ttsEmotion.trim()
-        : (existing.ttsEmotion ?? ''),
+    ttsModel: 'gemini',
+    ttsSampleRate: 24000,
+    ttsEmotion: '',
     voicePipeline: normalizeVoicePipeline(
       parsed.data.voicePipeline ?? existing.voicePipeline,
     ),
@@ -682,16 +670,13 @@ agentsRouter.put('/:id', async (req, res) => {
         : ((existing.realtimeS2sConfig as Partial<RealtimeS2sUserConfig> | null) ?? null),
     agentGender:
       (parsed.data.agentGender ?? existing.agentGender) === 'male' ? 'male' : 'female',
-    llmProvider: (parsed.data.llmProvider ?? existing.llmProvider) as 'groq' | 'gpt',
+    llmProvider: 'gpt' as const,
     llmModel: parsed.data.llmModel ?? existing.llmModel,
-    sttProvider: normalizeSttProvider(
-      parsed.data.sttProvider ?? existing.sttProvider,
-    ),
-    sttModel: resolveSttModel(
-      normalizeSttProvider(parsed.data.sttProvider ?? existing.sttProvider),
-      parsed.data.sttModel ?? existing.sttModel,
-    ),
+    sttProvider: 'none',
+    sttModel: '',
     brainMarkdown: parsed.data.brainMarkdown ?? existing.brainMarkdown,
+    agentRules: parsed.data.agentRules ?? existing.agentRules,
+    playbook: parsed.data.playbook !== undefined ? parsed.data.playbook : existing.playbook,
     learningsEnabled: parsed.data.learningsEnabled ?? existing.learningsEnabled,
     generalKnowledgeEnabled:
       parsed.data.generalKnowledgeEnabled ?? existing.generalKnowledgeEnabled,
@@ -710,6 +695,9 @@ agentsRouter.put('/:id', async (req, res) => {
       where: { id: req.params.id },
       data,
     });
+    if (agent.brainMarkdown !== existing.brainMarkdown) {
+      queueProductKnowledgeReindex(agent.id, agent.brainMarkdown);
+    }
     res.json(agent);
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Brain summarization failed';
